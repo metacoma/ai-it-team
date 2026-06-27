@@ -1614,3 +1614,118 @@ def route_continue_or_end(next_node: str):
         return next_node
 
     return _route
+
+
+def _has_qa_pass(state: OpenHandsGraphState) -> bool:
+    """Check whether the latest QA result constitutes a valid PASS with build/test evidence.
+
+    A valid QA PASS requires:
+    - action in PASS_ACTIONS
+    - validation with build_ran=True, build_passed=True, tests_run=True, tests_passed=True
+    - validation_level not in {syntax_only, syntax-only, not_validated, not-validated}
+    - no blocking validation_gaps
+    - QA must appear after the latest coder PASS (retry-aware)
+    - If summary lacks validation, fall back to parsing JSON from the answer field
+    """
+    coder_idx = _latest_coder_pass_index(state)
+    qa_result = _latest_result_for_role_after_index(state, "qa", coder_idx)
+    if not qa_result or not _role_action_pass(qa_result):
+        return False
+
+    validation = _validation_from_result(qa_result)
+    if not validation:
+        return False
+
+    build_ran = _truthy(validation.get("build_ran"))
+    build_passed = _truthy(validation.get("build_passed"))
+    tests_run = _truthy(validation.get("tests_run"))
+    tests_passed = _truthy(validation.get("tests_passed"))
+    if not (build_ran and build_passed and tests_run and tests_passed):
+        return False
+
+    level = str(validation.get("validation_level") or "").strip().lower()
+    if level in {"syntax_only", "syntax-only", "not_validated", "not-validated"}:
+        return False
+
+    # Check validation_gaps for blocking issues
+    gaps = validation.get("validation_gaps") or []
+    if gaps:
+        gap_text = " ".join(str(g) for g in gaps).lower()
+        blocking_gap_keywords = [
+            "not present", "not available", "cannot be validated",
+            "excluded by default", "structurally correct",
+            "not installed", "actual ci pipeline", "ci pipeline",
+            "should be verified in the actual",
+        ]
+        if any(kw in gap_text for kw in blocking_gap_keywords):
+            return False
+
+    # Also check the answer text for gap-related patterns that indicate
+    # the QA defers validation to CI/external pipeline
+    answer = str(qa_result.get("answer") or "")
+    answer_lower = answer.lower()
+    blocking_answer_patterns = [
+        "cannot be validated locally",
+        "structurally correct",
+        "excluded by default",
+        "requires the full ci pipeline",
+    ]
+    if any(pat in answer_lower for pat in blocking_answer_patterns):
+        return False
+
+    return True
+
+
+def _has_reviewer_pass(state: OpenHandsGraphState) -> bool:
+    """Check whether the latest reviewer result constitutes a valid PASS with validation review evidence.
+
+    A valid reviewer PASS requires either:
+    - validation_review object with qa_build_evidence_ok, qa_test_evidence_ok, qa_validation_level_ok all true
+    - OR prose evidence in the answer that reviewer performed validation review
+    """
+    reviewer_result = _latest_result_for_role(state, "reviewer")
+    if not reviewer_result or not _role_action_pass(reviewer_result):
+        return False
+
+    validation_review = _review_validation_from_result(reviewer_result)
+    if validation_review:
+        fields = ["qa_build_evidence_ok", "qa_test_evidence_ok", "qa_validation_level_ok"]
+        if all(_truthy(validation_review.get(field)) for field in fields):
+            if validation_review.get("validation_gaps"):
+                return False
+            return True
+
+    # Fall back to prose evidence in answer
+    answer = str(reviewer_result.get("answer") or "")
+    if not answer.strip():
+        return False
+
+    answer_lower = answer.lower()
+    has_build_evidence = any(kw in answer_lower for kw in ["build", "compile", "javac", "gradle", "maven", "pip install", "setup.py", "pyproject"])
+    has_test_evidence = any(kw in answer_lower for kw in ["test", "smoke", "integration", "pytest", "unittest"])
+    has_diff_review = any(kw in answer_lower for kw in ["diff", "changed file", "reviewed", "static check", "syntax check", "py_compile"])
+
+    if has_build_evidence and has_test_evidence and has_diff_review:
+        # Check for acceptance of gaps that would invalidate the pass
+        gap_acceptance_patterns = [
+            "cannot run in this sandbox",
+            "should be confirmed in the actual ci",
+            "cannot be validated locally",
+        ]
+        if any(pat in answer_lower for pat in gap_acceptance_patterns):
+            return False
+        return True
+
+    return False
+
+
+def _reviewer_pass_gate(state: OpenHandsGraphState) -> tuple[bool, str | None]:
+    """Gate that returns (ok, reason) for whether reviewer pass is valid.
+
+    Returns (True, None) if _has_reviewer_pass(state) is True.
+    Returns (False, reason) otherwise.
+    """
+    if _has_reviewer_pass(state):
+        return True, None
+    return False, "Reviewer did not return a valid PASS with validation review evidence"
+
