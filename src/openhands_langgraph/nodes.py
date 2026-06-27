@@ -34,6 +34,22 @@ class OpenHandsLangGraphError(RuntimeError):
     """Configuration/runtime error raised by the LangGraph integration layer."""
 
 
+def _resolve_role_model(role: str, state: OpenHandsGraphState) -> str | None:
+    """Resolve the model for a role, with YAML config override.
+
+    Precedence:
+    1. YAML config: state["role_models"][role]
+    2. Global model: state["model"]
+    3. None (falls back to instance.default_model)
+    """
+    role_models = state.get("role_models")
+    if isinstance(role_models, dict):
+        model = role_models.get(role)
+        if model and isinstance(model, str) and model.strip():
+            return model.strip()
+    return state.get("model")
+
+
 _COLOR = {
     "reset": "\033[0m",
     "bold": "\033[1m",
@@ -485,7 +501,7 @@ async def _run_role_with_prompt(
             prompt=prompt,
             conversation_start=conversation_start,
             known_event_ids=known_event_ids,
-            model=state.get("model"),
+            model=_resolve_role_model(role, state),
             repository=state.get("repository"),
             branch=state.get("branch"),
             git_provider=state.get("git_provider"),

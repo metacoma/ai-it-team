@@ -18,6 +18,10 @@ class OpenHandsGraphState(TypedDict, total=False):
     role: str
     role_instance: str | None
     model: str | None
+
+    # Per-role model overrides from YAML config.
+    role_models: JsonDict | None
+
     repository: str | None
     branch: str | None
     git_provider: str | None
