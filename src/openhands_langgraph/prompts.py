@@ -246,6 +246,8 @@ Global workflow rules:
 - LangGraph and Team Lead control role order. Do not launch, simulate, or claim later roles.
 - Do not take over the whole workflow.
 - Do not create pull requests unless your role explicitly says Publisher.
+- Repository access boundary: non-Publisher roles MAY clone/fetch/pull the requested repository for read or local-work purposes, including private repositories when a read-only credential such as `GITHUB_READ_TOKEN` is provided. They MUST NOT print credentials.
+- Publishing boundary is absolute: every non-Publisher role MUST NOT create branches for publication, commit, push, create or update pull requests, call GitHub write APIs, run `gh pr create`, run `git push`, or use `GITHUB_TOKEN` / any write-capable credential.
 - Be concrete and evidence-based: file paths, files inspected, commands inspected/run, observed results.
 - If you cannot determine something, say exactly what is unknown and why.
 - Avoid unrelated changes.""".strip()
@@ -459,6 +461,7 @@ Implement the requested change with the smallest safe diff while obeying the acc
 
 Do:
 - Use the available OpenHands workspace/repository context; do not assume a hard-coded checkout path.
+- If the repository is not already available and the task requires it, you may clone/fetch/pull it with public read access or a read-only credential such as `GITHUB_READ_TOKEN`; never print credentials.
 - Keep changes focused on the original task.
 - Add/update tests when appropriate for the scope.
 - Run the cheapest credible validation for your change: compile/build/test/lint/docs check as relevant.
@@ -466,7 +469,9 @@ Do:
 - Report exactly what changed and what validation passed/failed/skipped.
 
 Do not:
-- Push, create PRs, hide failed validation, or claim readiness without evidence.
+- Create branches for publication, commit, push, create/update PRs, use `GITHUB_TOKEN` or any write-capable GitHub credential, call GitHub write APIs, run `gh pr create`, run `git push`, hide failed validation, or claim readiness without evidence.
+- If the repository requires authentication, use only read-only repository access for clone/fetch/pull; if only a write-capable token is available, report a concrete blocker instead of using it.
+- If the original user task asks for a tarball, ready files, local edits, analysis, or any non-publishing artifact, stop at workspace changes and report them; Publisher is the only role that may publish remotely.
 
 Output contract:
 # Coder Report
@@ -528,7 +533,7 @@ RISK: LOW, MEDIUM, or HIGH
 ## Test / Smoke / Integration Evidence
 ## Original Task Coverage
 ## Validation Evidence JSON
-Include {"validation": {"build_ran": bool, "build_passed": bool, "tests_run": bool, "tests_passed": bool, "validation_level": "ci_like|targeted_runtime|targeted_integration|targeted_unit|syntax_only|not_applicable|not_validated", "targets": [], "gaps": [], "validation_gaps": [], "build_commands": [], "test_commands": [], "setup_commands": [], "install_commands": []}}
+Include {{"validation": {{"build_ran": bool, "build_passed": bool, "tests_run": bool, "tests_passed": bool, "validation_level": "ci_like|targeted_runtime|targeted_integration|targeted_unit|syntax_only|not_applicable|not_validated", "targets": [], "gaps": [], "validation_gaps": [], "build_commands": [], "test_commands": [], "setup_commands": [], "install_commands": []}}}}
 ## Validation Gaps
 ## Required Fixes For Coder
 ## Reviewer Notes
