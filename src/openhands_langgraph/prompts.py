@@ -744,6 +744,7 @@ Current-role assignment boundary:
 - For every non-Publisher role, `instructions` must not ask for commit, branch creation for publication, push, PR / pull request creation or update, `gh pr`, GitHub write API calls, `GITHUB_TOKEN`, or any write-capable credential.
 - If publishing is needed, mention it only in `future_workflow_plan` and choose `publisher` later as a separate role after required evidence exists.
 - Before returning RUN_ROLE/RETRY_ROLE, compare `instructions` with the capability matrix and fill `assignment_scope_check`.
+- `assignment_scope_check.publishing_actions_in_non_publisher_assignment` is about the selected role's `instructions` only. Publishing steps mentioned only in `future_workflow_plan` do not count; in that normal case set it to false.
 
 Allowed actions:
 - RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, ASK_HUMAN.
@@ -807,7 +808,7 @@ Required JSON keys:
 - context_sources: array of state/artifact names to pass
 - instructions: concise instructions for the selected specialist role only; no future-role work
 - future_workflow_plan: array of future workflow steps that must not be executed by the selected specialist role
-- assignment_scope_check: object with keys selected_role, instructions_contain_only_selected_role_work, future_work_not_instructions, publishing_actions_in_non_publisher_assignment, notes
+- assignment_scope_check: object with keys selected_role, instructions_contain_only_selected_role_work, future_work_not_instructions, publishing_actions_in_non_publisher_assignment, notes. The publishing_actions_in_non_publisher_assignment flag must inspect only `instructions`, not `future_workflow_plan`.
 - reason: why this is the next safe step
 - accepted_report_ids: object with optional keys scout, research, senior_staff_engineer, architect, coder, qa, reviewer, publisher
 - policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks

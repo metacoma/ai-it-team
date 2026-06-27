@@ -1327,15 +1327,12 @@ def _assignment_scope_ok(decision: TeamLeadDecision) -> tuple[bool, str | None]:
     if not next_role or next_role not in _NON_PUBLISHER_ROLES:
         return True, None
 
-    scope = getattr(decision, "assignment_scope_check", None)
-    publishing_flag = getattr(scope, "publishing_actions_in_non_publisher_assignment", None)
-    if publishing_flag is True:
-        return (
-            False,
-            f"Invalid Team Lead decision: next_role={next_role} cannot receive publishing instructions; "
-            "move commit/branch/push/PR/GitHub write work to future_workflow_plan and choose publisher later.",
-        )
-
+    # Do not trust the Team Lead's self-reported assignment_scope_check as a
+    # structural rejection signal. Small/local models can easily set
+    # publishing_actions_in_non_publisher_assignment=true because publishing is
+    # mentioned in future_workflow_plan, even when the current role instructions
+    # are safe. The validator is the authority: reject only actual forbidden
+    # publishing instructions assigned to the current non-Publisher role.
     instructions = str(getattr(decision, "instructions", "") or "")
     bad_lines = [
         line.strip()
