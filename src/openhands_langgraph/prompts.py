@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from .reports import compact_report_summary, compact_validation_profile
+from .reports import compact_validation_profile
 
 JsonDict = dict[str, Any]
 
-PASS_ACTIONS = {"PASS", "COMPLETED", "DONE", "OK", "CONTINUE", "PLAN_READY"}
-NEED_FIX_ACTIONS = {"NEED_FIX", "FIX", "REWORK", "RETRY"}
+PASS_ACTIONS = {"PASS", "COMPLETED", "DONE", "OK", "CONTINUE", "PLAN_READY", "PROCEED"}
+NEED_FIX_ACTIONS = {"NEED_FIX", "FIX", "REWORK", "RETRY", "NEED_MORE_RESEARCH", "NEED_MORE_SCOUT"}
 BLOCK_ACTIONS = {"BLOCKER", "BLOCK", "FAILED", "FAIL"}
 TEAM_LEAD_RUN_ACTIONS = {"RUN_ROLE", "RETRY_ROLE"}
 TEAM_LEAD_STOP_ACTIONS = {"STOP_COMPLETED", "STOP_BLOCKED", "ASK_HUMAN"}
@@ -23,13 +24,17 @@ TEAM_LEAD_ALLOWED_ROLES = {
 }
 
 
+def normalize_action(action: Any) -> str:
+    if action is None:
+        return ""
+    return str(action).strip().upper().replace("-", "_").replace(" ", "_")
+
+
 def _summary_dict(result: JsonDict | None) -> JsonDict:
     if not result:
         return {}
     summary = result.get("summary")
-    if isinstance(summary, dict):
-        return summary
-    return {}
+    return summary if isinstance(summary, dict) else {}
 
 
 def _summary_value(result: JsonDict | None, key: str, default: Any = "") -> Any:
@@ -51,14 +56,11 @@ def _summary_value(result: JsonDict | None, key: str, default: Any = "") -> Any:
 
 
 def _summary_text(result: JsonDict | None) -> str:
-    value = _summary_value(result, "summary", "")
-    return str(value or "")
+    return str(_summary_value(result, "summary", "") or "")
 
 
 def _answer_text(result: JsonDict | None) -> str:
-    if not result:
-        return ""
-    return str(result.get("answer") or "")
+    return str((result or {}).get("answer") or "")
 
 
 def _answer_len(result: JsonDict | None) -> int:
@@ -67,15 +69,14 @@ def _answer_len(result: JsonDict | None) -> int:
 
 def _short(value: Any, limit: int = 260) -> str:
     text = str(value or "").replace("\n", " ").strip()
-    if len(text) > limit:
-        return text[: limit - 3] + "..."
-    return text
+    return text[: limit - 3] + "..." if len(text) > limit else text
 
 
 def _role_result_meta_lines(result: JsonDict | None) -> list[str]:
     if not result:
         return ["- status: missing"]
     lines = [
+        f"- report_id: {result.get('report_id') or 'unknown'}",
         f"- role: {result.get('role') or 'unknown'}",
         f"- role_instance: {result.get('role_instance') or 'unknown'}",
         f"- conversation_id: {result.get('conversation_id') or 'unknown'}",
@@ -85,12 +86,18 @@ def _role_result_meta_lines(result: JsonDict | None) -> list[str]:
         f"- risk_level: {_summary_value(result, 'risk_level', 'unknown') or 'unknown'}",
         f"- blocking: {_summary_value(result, 'blocking', False)}",
     ]
-    summary = _summary_text(result)
-    if summary:
-        lines.append(f"- summary: {summary}")
+    if _summary_text(result):
+        lines.append(f"- summary: {_summary_text(result)}")
     blocking_summary = _summary_value(result, "blocking_summary", [])
     if blocking_summary:
         lines.append(f"- blocking_summary: {blocking_summary}")
+    role_report = result.get("role_report") if isinstance(result, dict) else None
+    if isinstance(role_report, dict):
+        compact = {k: role_report.get(k) for k in ("report_id", "role", "action", "summary", "risk_level", "blocking")}
+        for key in ("research_required", "research_domains", "research_questions", "files_changed", "ready_for_qa", "validation", "validation_review", "pr_checks"):
+            if role_report.get(key) not in (None, [], {}):
+                compact[key] = role_report.get(key)
+        lines.append("- typed_report: " + json.dumps({k: v for k, v in compact.items() if v is not None}, ensure_ascii=False)[:1600])
     return lines
 
 
@@ -108,10 +115,8 @@ def role_answer_context(state: JsonDict, role: str, *, label: str | None = None)
         return f"No {role} answer is available yet."
     answer = _answer_text(result).strip()
     if not answer:
-        return f"No full {role} answer was retained in graph state. Use the {role} summary/conversation_id as a fallback."
-    return f"""----- BEGIN {title} ANSWER -----
-{answer}
------ END {title} ANSWER -----""".strip()
+        return f"No full {role} answer was retained in graph state. Use the {role} summary/conversation_id as fallback."
+    return f"----- BEGIN {title} ANSWER -----\n{answer}\n----- END {title} ANSWER -----"
 
 
 def repository_context(state: JsonDict) -> str:
@@ -122,23 +127,22 @@ def repository_context(state: JsonDict) -> str:
 - Use the workspace/repository that OpenHands provides.
 - Do not assume a fixed checkout directory.
 - Do not create duplicate clones just because a hard-coded path is absent.
-- If no repository is available but the task requires one, report a concrete blocker.
-""".strip()
+- If no repository is available but the task requires one, report a concrete blocker.""".strip()
     return """Repository/workspace context:
 - No repository was specified in graph state.
 - Use whatever workspace, repository, files, or environment OpenHands already provides.
 - Do not assume or invent a repository path.
-- If repository access is required but unavailable, report a concrete blocker instead of guessing.
-""".strip()
+- If repository access is required but unavailable, report a concrete blocker instead of guessing.""".strip()
 
 
 def shared_workspace_context() -> str:
     return """Shared workspace contract:
-- All role conversations operate on the same mounted workspace/filesystem for this workflow.
-- Role conversations are separate, but repository file changes made by writer roles are visible to later roles through the shared workspace.
-- Docker sandbox images/runtime packages may differ between role conversations. Do not assume OS packages installed by another role are available in your container.
-- Read-only roles must not modify shared workspace files. Writer/QA/reviewer/publisher roles must keep changes focused and report any environment/package installation attempts.
-""".strip()
+- Role conversations are separate, but they operate on the same mounted workspace/filesystem for this workflow.
+- File changes made by writer roles are visible to later roles through the shared workspace.
+- Docker sandbox images/runtime packages may differ between role conversations.
+- Do not assume OS packages installed by another role are available in your container.
+- Read-only roles must not modify shared workspace files.
+- Writer/QA/reviewer/publisher roles must keep changes focused and report setup/install attempts.""".strip()
 
 
 def latest_validation_profile(state: JsonDict) -> JsonDict:
@@ -160,11 +164,46 @@ def latest_validation_profile(state: JsonDict) -> JsonDict:
 def validation_profile_context(state: JsonDict) -> str:
     profile = latest_validation_profile(state)
     if not profile:
-        return "Validation profile: not established yet. Scout/Research/Senior Staff/Architect should discover required CI/runtime targets when relevant."
-    import json
+        return "Validation profile: not established yet. Scout/Research/Senior Staff/Architect should discover required build/test/runtime targets when relevant."
+    return "Validation profile / required target contract for this workflow:\n" + json.dumps(
+        compact_validation_profile(profile), ensure_ascii=False, indent=2
+    )
 
-    compact = compact_validation_profile(profile)
-    return "Validation profile / required target contract for this workflow:\n" + json.dumps(compact, ensure_ascii=False, indent=2)
+
+def _policy_context_from_team_lead(state: JsonDict) -> str:
+    decision = state.get("team_lead_decision")
+    if not isinstance(decision, dict):
+        return "Latest Team Lead policy_evaluation: none."
+    policy = decision.get("policy_evaluation")
+    if not isinstance(policy, dict):
+        return "Latest Team Lead policy_evaluation: none."
+    important = {
+        key: value
+        for key, value in policy.items()
+        if key
+        in {
+            "can_skip_qa",
+            "skip_qa_reason",
+            "can_skip_reviewer",
+            "skip_reviewer_reason",
+            "can_skip_research",
+            "skip_research_reason",
+            "can_skip_architect",
+            "skip_architect_reason",
+            "can_review",
+            "can_publish",
+            "qa_evidence_accepted",
+            "reviewer_evidence_accepted",
+            "publisher_pr_checks_accepted",
+            "publisher_no_checks_accepted",
+            "accepted_risks",
+            "blocking_reasons",
+        }
+        and value not in (None, "", [], {})
+    }
+    if not important:
+        return "Latest Team Lead policy_evaluation: no waivers/acceptance flags set."
+    return "Latest Team Lead policy_evaluation:\n" + json.dumps(important, ensure_ascii=False, indent=2)
 
 
 def team_lead_assignment_context(state: JsonDict) -> str:
@@ -186,6 +225,7 @@ def team_lead_assignment_context(state: JsonDict) -> str:
         lines.append(f"- instructions: {instructions}")
     if context_sources:
         lines.append(f"- requested_context_sources: {', '.join(map(str, context_sources))}")
+    lines.append(_policy_context_from_team_lead(state))
     return "\n".join(lines)
 
 
@@ -203,32 +243,29 @@ Original user task:
 
 Global workflow rules:
 - Execute only the responsibility of your current role.
-- LangGraph validates and executes role order. Do not launch, simulate, or claim later roles.
+- LangGraph and Team Lead control role order. Do not launch, simulate, or claim later roles.
 - Do not take over the whole workflow.
-- Do not create pull requests unless your role explicitly says publisher.
-- Be concrete and evidence-based.
-- Prefer explicit file paths, files inspected, commands inspected, and observed results.
+- Do not create pull requests unless your role explicitly says Publisher.
+- Be concrete and evidence-based: file paths, files inspected, commands inspected/run, observed results.
 - If you cannot determine something, say exactly what is unknown and why.
-- Avoid unrelated changes.
-""".strip()
+- Avoid unrelated changes.""".strip()
 
 
-READ_ONLY_DISCOVERY_RULES = """Read-only discovery rules for Scout/Research/Senior Staff/Architect:
-- You are read-only with respect to repository files, git state, branches, commits, generated files, dependencies, and environment.
+READ_ONLY_DISCOVERY_RULES = """Read-only discovery rules:
+- You are read-only with respect to repository files, git state, branches, commits, dependencies, generated files, and environment.
 - You may inspect files and run narrowly scoped read-only discovery commands.
-- You MUST NOT run tests, builds, linters, type checks, formatters, generators, installers, package managers, services, containers, migrations, or any command that may write files.
-- You may discover and document likely validation commands for later Coder/QA/Reviewer roles, but you must not execute them.
-""".strip()
+- You MUST NOT run tests, builds, linters, formatters, generators, package installers, migrations, services, containers, or commands that may write files.
+- You may document likely validation commands for later Coder/QA/Reviewer roles, but you must not execute them.
+- If facts require running validation/build/test commands, report that limitation explicitly.""".strip()
 
 
-MUTABLE_ENVIRONMENT_RULES = """Mutable sandbox/container environment rules for roles allowed to execute, validate, review, or publish:
+MUTABLE_ENVIRONMENT_RULES = """Mutable sandbox/container environment rules:
 - You are running inside an OpenHands Docker sandbox based on Debian Trixie.
 - If an OS package is required and installing it is necessary and safe for your role, use sudo.
-- Prefer minimal installation commands, for example: sudo apt-get update && sudo apt-get install -y <package>.
-- Do not use sudo for repository file ownership hacks or broad system changes unrelated to the task.
-- Report every package installation/setup attempt and why it was needed.
-- Coder, QA, Reviewer, and Publisher must not skip required validation or publishing work only because a reasonable tool is missing; install missing reasonable tools when needed.
-""".strip()
+- Prefer minimal installation commands, for example: sudo apt-get update && sudo apt-get install -y <packages>.
+- Do not use sudo for repository ownership hacks or broad unrelated system changes.
+- Report every package installation attempt and why it was needed.
+- Missing validation dependencies may be OS packages, language packages, generated sources, sibling checkouts, services, GUI/Xvfb, or documented directory layout requirements.""".strip()
 
 
 def build_scout_prompt(state: JsonDict) -> str:
@@ -239,36 +276,36 @@ def build_scout_prompt(state: JsonDict) -> str:
 {READ_ONLY_DISCOVERY_RULES}
 
 Your responsibility:
-Investigate the available repository/workspace and task context. Produce a factual context report for later roles.
-
-Strict facts-only rule:
-- Do not produce root-cause hypotheses.
-- Do not rank candidate causes.
-- Do not write phrases such as "the root cause is", "likely root cause", "hypothesis", or "candidate root cause".
+Collect factual context for Team Lead and later roles. Do not diagnose final causes.
 
 Do:
-- Inspect repository structure, relevant files, build/test metadata, docs, CI logs when provided, and existing patterns.
-- Extract exact factual failure context when the task references CI/logs.
-- Identify relevant files and why they are relevant.
-- List documented build/test/validation commands for later roles, without running them.
-- Build an initial validation_profile from CI workflows, README, package scripts, Makefile/Gradle/npm/bundle/pytest commands, helper scripts, runtime services, required env vars, and original failing CI step.
-- State whether external research is required before planning.
+- Inspect repository/workspace structure, relevant files, docs, CI/workflow metadata, package metadata, existing patterns, and user-provided logs.
+- Extract exact failure evidence when available: failing job, step, command, error text, stack trace excerpt, failing test name, visible environment.
+- Identify files/directories factually related to the task.
+- List documented build/test/validation commands for later roles without executing them.
+- Build a validation_profile only when the repository/task/CI/docs indicate real validation targets.
+- Identify research domains only when external/runtime/tooling rules matter or are unknown.
+- Identify whether the task appears to need code changes, docs/config changes, validation, review, publish, or human input.
+
+Do not:
+- Produce root-cause hypotheses, candidate causes, or diagnostic conclusions.
+- Modify files, run tests/builds/installers, commit, push, or create PRs.
 
 Output contract:
 # Scout Context Report
 ## Task Understanding
-## Factual CI / Log Evidence
+## Factual Evidence
 ## Repository / Workspace Facts
-## Relevant Files And Why They Are Relevant
+## Relevant Files And Why
 ## Existing Patterns
-## Documented Build/Test/Validation Commands To Run Later
+## Documented Validation Commands To Run Later
 ## Validation Profile
 ## Research Routing Metadata
-## Risks, Unknowns, And Missing Information
-## Context Notes For Architect
-## Context Notes For Coder
-Final line: SCOUT_STATUS: COMPLETE
-""".strip()
+Include research_required, research_domains, research_questions, recommended_next_role.
+## Role Routing Hints
+State which later roles appear necessary and why, as factual hints only.
+## Risks / Unknowns / Validation Questions
+Final line: SCOUT_STATUS: COMPLETE""".strip()
 
 
 def build_research_prompt(state: JsonDict) -> str:
@@ -276,7 +313,7 @@ def build_research_prompt(state: JsonDict) -> str:
 
 {team_lead_assignment_context(state)}
 
-Scout report artifact from previous role:
+Scout report artifact:
 {role_answer_context(state, 'scout', label='SCOUT REPORT')}
 
 Scout routing/status summary:
@@ -285,19 +322,23 @@ Scout routing/status summary:
 {validation_profile_context(state)}
 
 Your responsibility:
-Research external best practices, official documentation, and target-runtime constraints for the domains requested by Scout. Do not modify files or run repository validation.
+Research external best practices, official documentation, and target-runtime constraints for domains requested by Scout or Team Lead.
+
+Boundaries:
+- Research only. Do not modify files, run repo validation, push, or create PRs.
+- Prefer official/current primary sources when search tools are available.
+- If internet/search tools are unavailable, say so and clearly label stable general guidance as non-verified.
 
 Output contract:
 # Research Brief
 ## Inputs Reviewed
 ## Research Domains Covered
 ## External Environment Contracts
-## Cross-Environment Conflicts To Resolve
+## Cross-Environment Conflicts
 ## Validation Profile Additions Or Corrections
-## Recommendations For Architect
+## Recommendations For Architect / Team Lead
 ## Research Gaps / Unknowns
-Final line: RESEARCH_STATUS: COMPLETE
-""".strip()
+Final line: RESEARCH_STATUS: COMPLETE""".strip()
 
 
 def build_senior_staff_engineer_prompt(state: JsonDict) -> str:
@@ -307,49 +348,41 @@ def build_senior_staff_engineer_prompt(state: JsonDict) -> str:
 
 {READ_ONLY_DISCOVERY_RULES}
 
-Scout report artifact from previous role:
+Scout report artifact:
 {role_answer_context(state, 'scout', label='SCOUT REPORT')}
 
-Research brief artifact from previous role:
+Research brief artifact:
 {role_answer_context(state, 'research', label='RESEARCH BRIEF')}
 
 {validation_profile_context(state)}
 
 Your responsibility:
-Turn the user task, Scout facts, and Research constraints into a senior-level engineering strategy and execution contract. Do not implement, edit files, run tests, install packages, push, or create PRs.
+Turn the user task, Scout facts, and Research constraints into an execution contract and role-selection guidance.
 
-You must produce an Assumption Ledger:
-- assumption
-- target_environment
-- confidence: high | medium | low
-- evidence
-- cheap_preflight_check
-- expensive_validation
-- failure_cost
-
-Decision allowlist:
-- ACTION: PROCEED
-- ACTION: NEED_MORE_RESEARCH
-- ACTION: NEED_MORE_SCOUT
-- ACTION: ASK_HUMAN
-- ACTION: BLOCKER
+Core policy:
+- Do not force a fixed role chain. Recommend only roles that add necessary evidence or risk reduction for this task.
+- A role is necessary when skipping it would leave a material unknown about correctness, safety, target runtime, reviewability, or publishing.
+- A role is unnecessary when its responsibility is irrelevant, already covered by stronger evidence, or the task is low-risk and the residual risk is explicit.
 
 Output contract:
 # Senior Staff Engineering Strategy
 ## Decision
+Exactly one ACTION: PROCEED, NEED_MORE_RESEARCH, NEED_MORE_SCOUT, ASK_HUMAN, or BLOCKER
 ## Problem Classification
 ## Target Runtime Contract
 ## Assumption Ledger
+## Minimal Role Plan
+For each potentially useful role, say required | optional | unnecessary and why.
 ## Cheap Preflight Checks
 ## Expensive Validation Strategy
 ## Risk Assessment
 ## Architect Constraints
 ## Coder Constraints
-## Reviewer Focus
+## QA Necessity Guidance
+## Reviewer Necessity Guidance
 ## Publisher Constraints
 ## Stop Conditions
-Final line: SENIOR_STAFF_STATUS: COMPLETE
-""".strip()
+Final line: SENIOR_STAFF_STATUS: COMPLETE""".strip()
 
 
 def build_architect_prompt(state: JsonDict) -> str:
@@ -359,37 +392,42 @@ def build_architect_prompt(state: JsonDict) -> str:
 
 {READ_ONLY_DISCOVERY_RULES}
 
-Scout report artifact from previous role:
+Scout report artifact:
 {role_answer_context(state, 'scout', label='SCOUT REPORT')}
 
-Research brief artifact from previous role:
+Research brief artifact:
 {role_answer_context(state, 'research', label='RESEARCH BRIEF')}
 
-Senior Staff engineering strategy / execution contract artifact:
+Senior Staff strategy artifact:
 {role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
 
+{validation_profile_context(state)}
+
 Your responsibility:
-Create a precise implementation plan for the coder. Plan only. Do not implement, modify files, run tests, install packages, push, or create PRs.
+Create a precise, minimal, testable implementation plan for Coder. Do not implement.
+
+Role-flexibility guidance:
+- Specify which validation is actually required by the task and target runtime.
+- If full QA is likely unnecessary, explain the narrower evidence that would be sufficient and the residual risk.
+- If reviewer can safely proceed without QA, say exactly why; otherwise require QA and list targets.
+- Avoid task-specific hard-codes; base role requirements on risk, scope, affected files, target runtime, and available test/check commands.
 
 Output contract:
 # Architect Plan
 ## Goal
 ## Inputs Reviewed
-## Research Brief Applied
-## Senior Staff Strategy Applied
 ## Environment / Target Runtime Contract
-## Assumption Ledger Applied
-## Preflight Checks Required Before Expensive Actions
 ## Key Decisions
 ## Implementation Plan
 ## Files To Change
 ## Acceptance Criteria
-## Validation Plan For Coder/QA/Reviewer
+## Validation Plan
+## Minimal Required Role Evidence
+State what Coder/QA/Reviewer/Publisher evidence is required or can be waived and why.
 ## Risks And Mitigations
 ## Coder Instructions
 ## Do Not Do
-Final line: ARCHITECT_STATUS: COMPLETE
-""".strip()
+Final line: ARCHITECT_STATUS: COMPLETE""".strip()
 
 
 def build_coder_prompt(state: JsonDict) -> str:
@@ -407,36 +445,28 @@ Reviewer routing/status summary:
 
 {team_lead_assignment_context(state)}
 
-Scout routing/status summary:
-{role_summary_context(state, 'scout')}
-
-Senior Staff engineering strategy / execution contract artifact:
-{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
-
 {MUTABLE_ENVIRONMENT_RULES}
 
-Architect implementation plan artifact:
-{role_answer_context(state, 'architect', label='ARCHITECT PLAN')}
+Senior Staff strategy artifact:
+{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
 
-Architect routing/status summary:
-{role_summary_context(state, 'architect')}
+Architect plan artifact:
+{role_answer_context(state, 'architect', label='ARCHITECT PLAN')}
 {feedback_section}
 
 Your responsibility:
-Implement the architect plan with the smallest safe code changes while obeying the Senior Staff execution contract, assumption ledger, and required preflight checks.
-
-Hard safety rules:
-- You may modify files only when required by the task and architect plan.
-- Do not push and do not create pull requests.
-- Do not modify unrelated files.
-- If pre-existing uncommitted source/config/test changes are present, stop and report them unless clearly generated/cache artifacts.
+Implement the requested change with the smallest safe diff while obeying the accepted plan and Team Lead assignment.
 
 Do:
-- Keep changes focused.
-- Add/update tests when appropriate.
-- Compile/build the changed project or smallest affected module unless blocked.
-- Run relevant targeted tests/smoke tests when feasible.
+- Use the available OpenHands workspace/repository context; do not assume a hard-coded checkout path.
+- Keep changes focused on the original task.
+- Add/update tests when appropriate for the scope.
+- Run the cheapest credible validation for your change: compile/build/test/lint/docs check as relevant.
+- If no meaningful validation exists for the changed artifact, inspect/document that fact and report the residual risk; do not invent irrelevant tests.
 - Report exactly what changed and what validation passed/failed/skipped.
+
+Do not:
+- Push, create PRs, hide failed validation, or claim readiness without evidence.
 
 Output contract:
 # Coder Report
@@ -445,17 +475,14 @@ Output contract:
 ## Implementation Details
 ## Environment / Tool Installation
 ## Validation Environment Setup
-## Compilation / Build Evidence
+## Build / Compile / Check Evidence
 ## Test / Smoke Evidence
-## Acceptance Criteria Implementation Matrix
-## Execution Contract / Assumption Ledger Compliance
+## Acceptance Criteria Matrix
 ## Pipeline Readiness
-Pipeline readiness must be one of:
-PIPELINE_READINESS: READY_FOR_REVIEW
-PIPELINE_READINESS: NOT_READY_VALIDATION_FAILED
-PIPELINE_READINESS: BLOCKED
-Final line: CODER_STATUS: COMPLETE
-""".strip()
+One of: PIPELINE_READINESS: READY_FOR_REVIEW, NOT_READY_VALIDATION_FAILED, BLOCKED
+## Known Issues
+## Reviewer Notes
+Final line: CODER_STATUS: COMPLETE""".strip()
 
 
 def build_qa_prompt(state: JsonDict) -> str:
@@ -463,49 +490,49 @@ def build_qa_prompt(state: JsonDict) -> str:
 
 {team_lead_assignment_context(state)}
 
-Senior Staff engineering strategy / execution contract artifact:
-{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
-
 {MUTABLE_ENVIRONMENT_RULES}
 
-Architect implementation plan artifact:
+Senior Staff strategy artifact:
+{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
+
+Architect plan artifact:
 {role_answer_context(state, 'architect', label='ARCHITECT PLAN')}
 
-Coder routing/status summary, advisory only:
+Coder routing/status summary:
 {role_summary_context(state, 'coder')}
 
 {validation_profile_context(state)}
 
 Your responsibility:
-Validate that the implementation in the shared workspace actually builds and works.
+Validate that the implementation in the shared workspace actually works for the required target contract.
 
-Mandatory validation rules:
-- Inspect actual repository/workspace state and current diff before testing.
-- Map every validation_profile.required_targets target to validation.targets.
-- Install reasonable missing tools and report every install command.
-- Skipped tests are not passed tests.
-- Syntax-level validation is not sufficient for runtime/CI/integration/smoke tasks.
-- PASS requires credible build/test evidence or an explicit non-code/non-runtime task.
+Validation policy:
+- Inspect the actual repository/workspace state and current diff before testing.
+- Map validation_profile.required_targets when present.
+- Install reasonable missing validation tools with sudo when needed.
+- Reconstruct required validation environment when repository docs/CI/scripts say it is required and safe.
+- Do not skip runtime/smoke/integration/CI targets that are relevant to the task unless setup attempts produce a concrete blocker.
+- For non-code/non-runtime changes with no relevant tests/checks, you may PASS only if you explicitly show why QA is not applicable and what lightweight checks you did instead.
 
 Output contract:
 # QA Report
 ## Decision
-Must contain exactly one line: ACTION: PASS, ACTION: NEED_FIX, or ACTION: BLOCKER
+ACTION: PASS, NEED_FIX, or BLOCKER
 ## Risk
-Must contain exactly one line: RISK: LOW, RISK: MEDIUM, or RISK: HIGH
+RISK: LOW, MEDIUM, or HIGH
 ## Summary
 ## Repository / Diff Inspected
 ## Environment / Tool Installation
 ## Validation Environment Setup
-## Compilation / Build Evidence
+## Build / Compile Evidence
 ## Test / Smoke / Integration Evidence
-## Original Failure Coverage
+## Original Task Coverage
 ## Validation Evidence JSON
+Include {"validation": {"build_ran": bool, "build_passed": bool, "tests_run": bool, "tests_passed": bool, "validation_level": "ci_like|targeted_runtime|targeted_integration|targeted_unit|syntax_only|not_applicable|not_validated", "targets": [], "gaps": [], "validation_gaps": [], "build_commands": [], "test_commands": [], "setup_commands": [], "install_commands": []}}
 ## Validation Gaps
 ## Required Fixes For Coder
 ## Reviewer Notes
-Final line: QA_STATUS: COMPLETE
-""".strip()
+Final line: QA_STATUS: COMPLETE""".strip()
 
 
 def build_reviewer_prompt(state: JsonDict) -> str:
@@ -513,18 +540,18 @@ def build_reviewer_prompt(state: JsonDict) -> str:
 
 {team_lead_assignment_context(state)}
 
-Senior Staff engineering strategy / execution contract artifact:
-{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
-
 {MUTABLE_ENVIRONMENT_RULES}
 
-Architect implementation plan artifact:
+Senior Staff strategy artifact:
+{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
+
+Architect plan artifact:
 {role_answer_context(state, 'architect', label='ARCHITECT PLAN')}
 
-Coder routing/status summary, advisory only:
+Coder routing/status summary:
 {role_summary_context(state, 'coder')}
 
-QA validation report artifact:
+QA validation artifact, if Team Lead ran QA:
 {role_answer_context(state, 'qa', label='QA VALIDATION REPORT')}
 
 QA routing/status summary:
@@ -533,34 +560,37 @@ QA routing/status summary:
 {validation_profile_context(state)}
 
 Your responsibility:
-Review the actual repository/workspace state independently against the original task, Senior Staff execution contract, architect plan, and QA validation evidence.
+Independently review the actual repository/workspace diff against the original task, accepted plan, available validation evidence, and Team Lead policy.
 
-Review rules:
-- You are read-only with respect to repository files, git history, branches, commits, and configuration.
-- You may run safe read-only inspection and validation commands.
-- Do not implement fixes, push branches, or create PRs.
-- Do not accept QA PASS without credible build/test/runtime evidence for the task.
+Flexible QA policy:
+- QA evidence is valuable but not always mandatory. If Team Lead explicitly skipped QA with policy_evaluation.can_skip_qa=true, treat the waiver as an input, not as automatic acceptance.
+- When QA was skipped, independently decide whether that skip is safe for this task. PASS only if the diff is low-risk enough and you performed the relevant lightweight review/checks yourself.
+- When QA was required or run, inspect QA evidence. Do not PASS if required runtime/smoke/integration/CI targets were skipped without concrete setup attempts.
+
+Do:
+- Inspect actual diff/files, not only summaries.
+- Run relevant static/lint/syntax checks for changed file types when practical and non-mutating.
+- Report concrete required fixes for any NEED_FIX.
+
+Do not:
+- Implement fixes, push, or create PRs.
 
 Output contract:
 # Reviewer Report
 ## Decision
-Must contain exactly one line: ACTION: PASS, ACTION: NEED_FIX, or ACTION: BLOCKER
+ACTION: PASS, NEED_FIX, or BLOCKER
 ## Risk
-Must contain exactly one line: RISK: LOW, RISK: MEDIUM, or RISK: HIGH
+RISK: LOW, MEDIUM, or HIGH
 ## Summary
 ## Evidence Reviewed
-## QA Evidence Review
+## QA Evidence / QA Waiver Review
 ## Independent Lint / Static Check Evidence
-## Validation Environment Reconstruction Review
-## QA Validation Evidence Gate
 ## Validation Review
-## Execution Contract / Assumption Ledger Review
 ## Acceptance Criteria Verification Matrix
 ## Findings
 ## Required Fixes For Coder
 ## Publisher Notes
-Final line: REVIEWER_STATUS: COMPLETE
-""".strip()
+Final line: REVIEWER_STATUS: COMPLETE""".strip()
 
 
 def build_publisher_prompt(state: JsonDict) -> str:
@@ -568,15 +598,12 @@ def build_publisher_prompt(state: JsonDict) -> str:
 
 {team_lead_assignment_context(state)}
 
-Senior Staff engineering strategy / execution contract artifact:
-{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
-
-Senior Staff routing/status summary:
-{role_summary_context(state, 'senior_staff_engineer')}
-
 {MUTABLE_ENVIRONMENT_RULES}
 
-Architect implementation plan artifact:
+Senior Staff strategy artifact:
+{role_answer_context(state, 'senior_staff_engineer', label='SENIOR STAFF STRATEGY')}
+
+Architect plan artifact:
 {role_answer_context(state, 'architect', label='ARCHITECT PLAN')}
 
 QA routing/status summary:
@@ -588,98 +615,56 @@ Reviewer routing/status summary:
 {validation_profile_context(state)}
 
 Your responsibility:
-Inspect the final repository changes, verify they are safe against the Senior Staff execution contract, QA validation decision, and Reviewer decision, publish them to the remote GitHub repository, create a pull request using `curl` with `GITHUB_TOKEN`, then use the GitHub CLI (`gh`) authenticated with `GITHUB_TOKEN` for all post-creation PR inspection/check/status/watch operations, and return the check result to Team Lead. You are the only role allowed to push and create a PR.
+Inspect final repository changes, verify they match the task and accepted Team Lead policy, push a branch, create/find a GitHub PR using curl + GITHUB_TOKEN, then inspect PR checks with gh.
 
-Hard publishing rules:
-- Use GITHUB_TOKEN from the environment. Never print or expose the token.
-- Create the pull request with `curl` against the GitHub REST API using `GITHUB_TOKEN`. Do not use `gh pr create` for PR creation.
-- Use the GitHub CLI (`gh`) for all actions after PR creation: PR discovery/view/list, head SHA inspection, PR checks, and waiting for checks.
-- Raw GitHub REST API shell calls are allowed only for the PR creation step. Do not use raw REST/curl for check discovery/watch when `gh` can do it.
-- If `gh` is missing, install it when reasonable. If installation is impossible, return ACTION: BLOCKER with exact evidence.
-- Ensure `gh` is authenticated using GITHUB_TOKEN. Do not echo the token in logs.
-- Push the prepared branch to the remote repository without leaking secrets.
-- Do not modify implementation code. If code changes are required, return ACTION: NEED_FIX or ACTION: BLOCKER instead of editing.
-- Do not publish unrelated, destructive, secret, generated-cache, or suspicious changes.
-- If the repository is not a GitHub repository, GITHUB_TOKEN is missing, no relevant changes exist, PR creation via curl is impossible, `gh` cannot authenticate for post-creation inspection/checks, or remote/push is impossible, report ACTION: BLOCKER with exact evidence.
-
-Required publishing procedure:
-1. Inspect repository state: git status, current branch, remotes, diff/stat, recent commits.
-2. Confirm the changes match the original task, Senior Staff constraints, architect plan, QA decision, and Reviewer decision.
-3. Ensure `curl` is available for PR creation and `gh` is available for post-creation PR inspection/checks. Authenticate `gh` with `GITHUB_TOKEN` before PR inspection/check operations. Use `gh auth status` to verify authentication without exposing secrets.
-4. Choose or create a safe feature branch when needed. Do not push directly to main/master unless the repository is already intentionally on a PR branch and that is safe.
-5. Stage and commit only relevant changes if they are not already committed. Use a concise task-focused commit message.
-6. Push the branch to the GitHub remote.
-7. Create the PR with `curl` + `GITHUB_TOKEN` using the GitHub REST API `POST /repos/{{owner}}/{{repo}}/pulls`. The request body must include title, head, base, and body. The PR body must summarize changes, QA validation, reviewer decision, and risks. Do not use `gh pr create` for this step. If an open PR already exists for the branch, detect it with `gh pr view` / `gh pr list` and report it instead of creating a duplicate.
-8. Capture and report: PR number, PR URL, branch/head ref, head SHA, base branch, and commit SHA. After PR creation via curl, use `gh pr view <number-or-branch> --json number,url,headRefName,headRefOid,baseRefName,state` to verify PR metadata.
-9. After the PR exists, check which GitHub checks were triggered using `gh pr checks`. Use `gh pr checks <number> --json bucket,completedAt,description,event,link,name,startedAt,state,workflow` for machine-readable results.
-10. Determine whether PR checks/statuses are actually configured for this repository before deciding how long to wait:
-    - Inspect local `.github/workflows/` if present.
-    - Run `gh workflow list` when available for this repository.
-    - Run an initial `gh pr checks <number> --json bucket,completedAt,description,event,link,name,startedAt,state,workflow` read.
-    - If no checks are visible immediately, wait a short no-checks grace window, then read `gh pr checks` again. Prefer `PUBLISHER_NO_CHECKS_GRACE_SECONDS` when present; otherwise use 120 seconds. This grace window is only for detecting whether checks exist, not for waiting for long-running checks.
-11. If one or more check runs/status contexts exist, or GitHub Actions workflows/status checks are configured for the repository, wait until checks finish or a bounded timeout is reached. Prefer `gh pr checks <number> --watch --interval <seconds>` when suitable, plus a final JSON read with `gh pr checks <number> --json ...`. Prefer environment variables `PUBLISHER_CHECK_TIMEOUT_SECONDS` and `PUBLISHER_CHECK_POLL_SECONDS` when present; otherwise use a reasonable bounded wait such as 30 minutes timeout and 30 seconds poll interval.
-12. If no workflows/status checks/check runs are configured or discovered after the no-checks grace window, do not treat that as a failed CI state. Return ACTION: PASS with structured `pr_checks.overall_status="no_checks_found"`, `pr_checks.checks_required=false`, `pr_checks.waited=true`, `pr_checks.no_checks_reason`, empty failing/pending checks, and evidence showing that the repository has no GitHub Actions workflows/status contexts for this PR.
-13. Return the PR checks result to Team Lead in the structured publisher report. Team Lead decides whether to STOP_COMPLETED or continue corrective work. ACTION: PASS is allowed only when `pr_checks` is present, `waited=true`, `head_sha` is present, no failing or pending checks remain, and either `overall_status=passed/success` for configured checks or `overall_status=no_checks_found` with `checks_required=false` for repositories with no configured checks.
-
-GitHub CLI requirements:
-- Derive owner/repo from git remote or repository context when needed. Use `gh repo view --json nameWithOwner,defaultBranchRef` when useful.
-- Use `GITHUB_TOKEN` for both curl PR creation and `gh` authentication; never print the token.
-- Prefer base branch from repository default/main/master when discoverable.
-- If a PR already exists for the branch, report the existing PR URL instead of creating duplicates when possible; use `gh pr view` / `gh pr list` for this discovery.
-- Determine PR head SHA using `gh pr view <number-or-branch> --json headRefOid` when possible. If needed, use `git rev-parse HEAD` after pushing and verify it matches the PR head.
-- Interpret `gh pr checks` JSON bucket/state values. Treat pass/skipping as non-failing unless project policy says otherwise; fail/cancel as failed; pending as not completed.
-- `gh pr checks` may exit with a pending-checks exit code while checks are still running. Pending is not failure by itself; continue waiting until timeout or completion.
-- If no checks appear after the no-checks grace window and repository evidence shows no GitHub Actions workflows/status contexts are configured, report `pr_checks.overall_status=no_checks_found`, `pr_checks.checks_required=false`, and return ACTION: PASS.
-- If checks are expected because workflows/status contexts exist but no check result appears before timeout, return ACTION: NEED_FIX or BLOCKER with `pr_checks.overall_status=timed_out` or `no_checks_found`, `pr_checks.checks_required=true`, and exact evidence.
-- If checks are pending at timeout, return ACTION: NEED_FIX with `pr_checks.overall_status=timed_out` or `pending` and include pending check names.
-- If checks fail or are cancelled, return ACTION: NEED_FIX unless publishing itself failed in a way that is a BLOCKER. Include failing check names, states/buckets, URLs, workflows, and logs/URLs when available.
-- If checks pass, return ACTION: PASS and include `pr_checks.overall_status=passed`.
-- If no checks are configured, return ACTION: PASS and include `pr_checks.overall_status=no_checks_found`, `checks_required=false`, `waited=true`, `no_checks_reason`, and the gh/local evidence used to establish that no checks are configured.
-- If you created/found a PR but did not run `gh pr checks --json ...` at least once after the no-checks grace window, do not return PASS. If checks exist, you must also run `gh pr checks --watch` or an equivalent bounded gh polling loop before PASS.
+Publishing rules:
+- You are the only role allowed to push and create a PR.
+- Use GITHUB_TOKEN from the environment. Never print or expose it.
+- Create a PR with curl against GitHub REST API; do not use gh pr create for creation.
+- Use gh for post-creation PR view/check/status operations.
+- If checks exist, wait for them with gh pr checks --watch or an equivalent bounded gh polling loop and report final status.
+- If no checks exist, do not invent CI success. Inspect whether the repo/branch actually has no check configuration/statuses, report structured pr_checks.overall_status="no_checks_configured" or "no_checks_found", waited=true, and include evidence. Team Lead decides whether to accept it.
+- Do not modify implementation code. Return NEED_FIX/BLOCKER if code changes are required.
 
 Output contract:
 # Publisher Report
 ## Decision
-Must contain exactly one line: ACTION: PASS, ACTION: NEED_FIX, or ACTION: BLOCKER
+ACTION: PASS, NEED_FIX, or BLOCKER
 ## Published Branch
 ## Commit
 ## Pull Request
 ## PR Checks / Statuses
-List check runs/status contexts, their status/conclusion/state, URLs, and final overall outcome. If no checks are configured, include explicit no-checks evidence.
 ## Evidence Inspected
-## Senior Staff / QA / Reviewer Constraint Check
+## Team Lead Policy / QA / Reviewer Constraint Check
 ## Commands Used
-Include the sanitized curl command used to create the PR and the gh commands used for PR view/checks. Do not include secrets.
+Do not include secrets.
 ## Risks / Notes
-Final line: PUBLISHER_STATUS: COMPLETE
-""".strip()
+Final line: PUBLISHER_STATUS: COMPLETE""".strip()
 
 
 def _team_lead_history_sections(state: JsonDict) -> str:
     results = [r for r in (state.get("role_results") or []) if isinstance(r, dict)]
     if not results:
         return "Specialist role results:\nNo specialist roles have completed or failed yet.\n\nPrevious Team Lead decisions:\nNo Team Lead decisions yet."
-
     specialist: list[str] = []
     failures: list[str] = []
     decisions: list[str] = []
     pending_or_absent: list[str] = []
     specialist_by_instance: set[str] = set()
     requested: list[tuple[str, str, str]] = []
-
     for result in results:
         role = str(result.get("role") or "unknown").lower()
         role_instance = str(result.get("role_instance") or role)
-        action = _summary_value(result, "action", "unknown") or "unknown"
+        action = normalize_action(result.get("summary_action") or _summary_value(result, "action", "unknown")) or "unknown"
         status = _summary_value(result, "status", result.get("status") or "unknown") or "unknown"
         risk = _summary_value(result, "risk_level", "unknown") or "unknown"
         blocking = _summary_value(result, "blocking", False)
         summary = _short(_summary_text(result), 500)
         conversation = result.get("conversation_id") or "unknown"
-
+        report_id = result.get("report_id") or "unknown"
         if role == "team_lead":
             decision = result.get("summary") if isinstance(result.get("summary"), dict) else {}
-            next_role = str((decision or {}).get("next_role") or (decision or {}).get("role") or "").strip().lower()
+            next_role = str((decision or {}).get("next_role") or "").strip().lower()
             next_instance = str((decision or {}).get("role_instance") or (f"{next_role}-1" if next_role else "")).strip()
             if action in TEAM_LEAD_RUN_ACTIONS and next_role:
                 requested.append((next_role, next_instance, action))
@@ -687,25 +672,27 @@ def _team_lead_history_sections(state: JsonDict) -> str:
             if summary:
                 decisions.append(f"  summary: {summary}")
             continue
-
         specialist_by_instance.add(role_instance)
-        line = f"- {role_instance} ({role}) status={status} action={action} risk={risk} blocking={blocking} ok={result.get('ok')} conversation={conversation}"
+        line = (
+            f"- {role_instance} ({role}) report_id={report_id} status={status} action={action} "
+            f"risk={risk} blocking={blocking} ok={result.get('ok')} conversation={conversation}"
+        )
         target = failures if (result.get("ok") is False or status == "failed" or action in BLOCK_ACTIONS) else specialist
         target.append(line)
         if result.get("error"):
             target.append(f"  error: {_short(result.get('error'), 700)}")
         if summary:
             target.append(f"  summary: {summary}")
-        role_report = result.get("role_report") if isinstance(result.get("role_report"), dict) else None
-        if role_report:
-            target.append("  typed_report: " + _short(compact_report_summary(role_report), 1200))
-
+        role_report = result.get("role_report")
+        if isinstance(role_report, dict):
+            compact = {k: role_report.get(k) for k in ("report_id", "role", "action", "summary", "risk_level", "blocking")}
+            for key in ("research_required", "research_domains", "files_changed", "ready_for_qa", "validation", "validation_review", "pr_checks"):
+                if role_report.get(key) not in (None, [], {}):
+                    compact[key] = role_report.get(key)
+            target.append("  typed_report: " + _short(json.dumps({k: v for k, v in compact.items() if v is not None}, ensure_ascii=False), 1200))
     for next_role, next_instance, action in requested:
         if next_instance and next_instance not in specialist_by_instance:
-            pending_or_absent.append(
-                f"- {action} requested {next_instance} ({next_role}), but no specialist result for that role_instance is present. Do not assume it completed."
-            )
-
+            pending_or_absent.append(f"- {action} requested {next_instance} ({next_role}), but no specialist result for that role_instance is present. Do not assume it completed.")
     sections = ["Specialist role results:"]
     sections.extend(specialist or ["No successful specialist role results yet."])
     sections.append("\nFailed specialist role attempts:")
@@ -740,49 +727,47 @@ Workflow history:
 {_team_lead_history_sections(state)}
 
 Allowed specialist roles:
-- scout: read-only repository/workspace/log context discovery; facts only, no root-cause hypotheses.
+- scout: read-only repository/workspace/log context discovery; facts only.
 - research: external best-practice / target-runtime research.
 - senior_staff_engineer: execution contract, assumption ledger, strategy gate.
 - architect: read-only implementation plan.
-- coder: modify files and validate implementation.
-- qa: validation engineer; install tools, compile/build, and run targeted tests/smoke tests.
-- reviewer: independent review of shared workspace/diff, QA evidence, and code quality.
-- publisher: inspect final changes, push branch, create GitHub PR via curl + GITHUB_TOKEN, then use gh for PR inspection/checks/status waiting and report their result.
+- coder: modify files and perform relevant self-validation.
+- qa: validation engineer; compile/build/run targeted checks when materially useful.
+- reviewer: independent review of actual diff, validation evidence or explicit QA waiver, and code quality.
+- publisher: inspect final changes, push branch, create/find GitHub PR, inspect/wait for PR checks/statuses.
 
 Allowed actions:
-- RUN_ROLE
-- RETRY_ROLE
-- STOP_COMPLETED
-- STOP_BLOCKED
-- ASK_HUMAN
+- RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, ASK_HUMAN.
 
-Delivery policy you must evaluate as Team Lead:
-- A Team Lead RUN_ROLE decision only means a role was requested; it does NOT mean that role completed.
-- Prefer scout before research when repository facts are missing.
-- Prefer research when target runtime/external environment rules are important or unknown.
-- Prefer senior_staff_engineer before architect when execution environment assumptions or high-level risks exist.
-- Architect is normally required before coder unless you explicitly accept a low-risk senior staff waiver.
-- After coder returns PASS/ready, normally choose RUN_ROLE qa before reviewer.
-- After QA returns PASS, inspect QA typed report and decide whether gaps are blocking, accepted risk, or require retry.
-- After reviewer returns PASS, inspect reviewer typed report and decide whether publishing is safe.
-- Do not choose publisher until you explicitly accept both QA and reviewer evidence in policy_evaluation and set policy_evaluation.can_publish=true.
-- After publisher returns, inspect publish.pr_url, publish.head_sha, and pr_checks.
-- Publisher PASS is not acceptable without structured pr_checks evidence.
-- Acceptable publisher pr_checks evidence is either:
-  (a) gh discovered PR checks/statuses, waited for them, and they completed successfully; or
-  (b) gh/local repository evidence shows no GitHub Actions workflows/status contexts/check runs are configured, Publisher waited a short no-checks grace window, and pr_checks has overall_status=no_checks_found, checks_required=false, waited=true, no failing/pending checks, and a concrete no_checks_reason.
-- If publisher created a PR but did not report pr_checks, did not identify head_sha, did not run gh pr checks after a no-checks grace window, reported timed_out/pending/failing checks, reported no_checks_found with checks_required=true, or only summarized PR creation, choose RETRY_ROLE publisher with instructions to use gh pr view and gh pr checks --json/--watch as appropriate, not STOP_COMPLETED.
-- If PR checks/statuses completed successfully, or if no checks are configured and Publisher provided acceptable no_checks_found evidence, choose STOP_COMPLETED with policy_evaluation.can_complete=true and publisher_pr_checks_accepted=true.
-- If checks failed, cancelled, timed out, were expected but missing, or publisher returned NEED_FIX/BLOCKER, treat PR checks as a new feedback loop.
-- For STOP_COMPLETED after publisher, set policy_evaluation.can_complete=true and publisher_pr_checks_accepted=true only if you accepted the publisher PR URL/head SHA and either the reported PR checks/statuses completed successfully or Publisher proved no checks/statuses are configured with pr_checks.overall_status=no_checks_found and checks_required=false. Do not complete on PR creation alone.
+Role-selection policy:
+- Do not follow a fixed chain mechanically. Choose the smallest safe next role that reduces material uncertainty for this task.
+- A role is required only when its responsibility is needed for correctness, target-runtime safety, reviewability, publishing safety, or recovery from a failed prior role.
+- A role may be skipped when it is irrelevant to the task, already covered by stronger evidence, or the residual risk is low and explicitly accepted.
+- Never hard-code task classes. Decide from evidence: changed artifact type, affected runtime, public API/schema/CI/deployment impact, available validation targets, risk, and prior role reports.
+- Prefer Scout first when repository facts are missing. Scout must collect facts/context only.
+- Prefer Research only when external/tool/runtime documentation is needed or Scout reports research_required/research_domains.
+- Prefer Senior Staff/Architect for uncertain, multi-file, public API, workflow, dependency, schema/proto, CI/runtime, deployment, security, or high-risk changes.
+- For very small low-risk changes, you may skip Research and/or Architect only with explicit waiver fields and accepted report ids.
+- After Coder, decide whether QA is needed. QA is normally useful for code, runtime, CI, integration, smoke, packaging, dependency, service, generated-source, or behavior changes. QA can be skipped for low-risk changes where no meaningful validation target exists or Coder/Reviewer evidence is enough.
+- If skipping QA, set policy_evaluation.can_skip_qa=true, non-empty skip_qa_reason, accepted_report_ids.coder, and list the residual risk in accepted_risks.
+- Reviewer is normally required before publishing changed files. You may skip Reviewer only for no-op/informational workflows or extremely low-risk mechanical changes where publishing safety is already covered, and only with policy_evaluation.can_skip_reviewer=true plus skip_reviewer_reason.
+- Do not choose Publisher until you accepted either QA PASS or an explicit QA waiver, and either Reviewer PASS or an explicit Reviewer waiver, and set policy_evaluation.can_publish=true.
+- Publisher PASS is acceptable only with structured PR/check evidence. If checks exist, they must be successful. If no checks are configured/found, Publisher must report structured no-checks evidence; you may accept it by setting publisher_no_checks_accepted=true and publisher_pr_checks_accepted=true.
+- STOP_COMPLETED requires a Publisher report you accept: PR URL/head SHA and either successful checks or accepted structured no-checks evidence.
+- If the last specialist role failed before producing a usable result, retry that same role_instance when retryable, or ASK_HUMAN/STOP_BLOCKED when unsafe.
+- If max steps is reached or the next safe role is unclear, choose ASK_HUMAN.
+
+Policy evaluation guidance:
+- Use accepted_report_ids for every report you rely on.
+- For every skipped role, set the matching can_skip_* flag and reason.
+- Put rejected/accepted gaps in blocking_reasons and accepted_risks.
+- Do not claim a role completed just because you requested it earlier.
 
 Decision output requirements:
-Your normal answer must be concise and explain only the next decision. The summary JSON for this role must contain all routing fields listed in the summary instruction.
 When choosing RUN_ROLE/RETRY_ROLE, include next_role, role_instance, context_sources, instructions, and reason.
 Recommended role_instance names: scout-1, research-1, senior_staff_engineer-1, architect-1, coder-1, qa-1, reviewer-1, publisher-1.
 
-Final line: TEAM_LEAD_STATUS: COMPLETE
-""".strip()
+Final line: TEAM_LEAD_STATUS: COMPLETE""".strip()
 
 
 def build_team_lead_decision_prompt(state: JsonDict) -> str:
@@ -795,9 +780,10 @@ Direct decision mode:
 - Do not claim that you inspected files, fetched URLs, read logs, ran commands, or completed a specialist role.
 - Decide only from the Workflow history shown above.
 - If no specialist role results exist, normally choose RUN_ROLE scout unless the task is pure external research.
-- If choosing scout, its instructions must say facts/context only and must not ask for hypotheses or candidate root causes.
+- If choosing scout, instructions must say facts/context only and must not ask for hypotheses or candidate root causes.
 
 Return exactly one compact valid JSON object. No Markdown. No prose.
+
 Required JSON keys:
 - valid: true
 - status: "completed"
@@ -812,26 +798,30 @@ Required JSON keys:
 - instructions: concise instructions for the selected specialist role
 - reason: why this is the next safe step
 - accepted_report_ids: object with optional keys scout, research, senior_staff_engineer, architect, coder, qa, reviewer, publisher
-- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks
-""".strip()
+- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks""".strip()
 
 
 def role_report_footer(role: str) -> str:
     role = (role or "role").lower()
     examples: dict[str, str] = {
-        "publisher": '''FINAL_ROLE_REPORT_JSON: { "schema_version": "1.0", "role": "publisher", "action": "PASS", "summary": "PR created/found and no checks are configured", "risk_level": "low", "blocking": false, "blocking_summary": [], "publish": {"branch": "feature/example", "commit": "", "head_sha": "", "base": "main", "pr_number": 0, "pr_url": "", "pushed": true, "pr_created": true, "existing_pr": false}, "pr_checks": { "overall_status": "no_checks_found", "checks_required": false, "no_checks_reason": "No .github/workflows directory, gh workflow list returned no workflows, and gh pr checks returned no check runs after the grace wait.", "head_sha": "", "waited": true, "timeout_seconds": 120, "poll_interval_seconds": 30, "check_runs": [], "commit_status": {"state": "no_status", "statuses": []}, "failing_checks": [], "pending_checks": [], "checked_at": "" }, "publisher_recommendation": {"ready_to_complete": true, "recommended_next_role": "team_lead", "reason": "No checks are configured for this repository"} }''',
-        "qa": '''FINAL_ROLE_REPORT_JSON: { "schema_version": "1.0", "role": "qa", "action": "PASS", "summary": "validation completed", "risk_level": "low", "blocking": false, "blocking_summary": [], "validation": { "overall_status": "passed", "validation_level": "targeted_integration", "build_ran": true, "build_passed": true, "tests_run": true, "tests_passed": true, "build_commands": [], "test_commands": [], "setup_commands": [], "install_commands": [], "targets": [], "gaps": [], "validation_gaps": [] }, "ready_for_review": true }''',
-        "reviewer": '''FINAL_ROLE_REPORT_JSON: { "schema_version": "1.0", "role": "reviewer", "action": "PASS", "summary": "review passed", "risk_level": "medium", "blocking": false, "blocking_summary": [], "review": { "diff_reviewed": true, "qa_evidence_reviewed": true, "qa_evidence_accepted": true, "findings": [], "required_fixes": [], "publisher_ready": true }, "validation_review": { "qa_build_evidence_ok": true, "qa_test_evidence_ok": true, "qa_validation_level_ok": true, "environment_reconstruction_reviewed": true, "syntax_only_rejected": true, "lint_commands": [], "setup_commands_reviewed": [], "validation_gaps": [] } }''',
+        "scout": '{"schema_version":"1.0","role":"scout","action":"PASS","summary":"facts-only context collected","risk_level":"medium","blocking":false,"blocking_summary":[],"research_required":false,"research_domains":[],"research_questions":[],"validation_profile":{"profile_id":"validation-profile-1","required_targets":[]},"routing_hints":{"recommended_next_role":"architect","roles_likely_needed":[]},"facts":{"relevant_files":[],"documented_commands":[],"unknowns":[],"validation_questions":[]}}',
+        "research": '{"schema_version":"1.0","role":"research","action":"PASS","summary":"research completed","risk_level":"medium","blocking":false,"blocking_summary":[],"domains":[],"findings":[],"validation_profile":{"profile_id":"validation-profile-1","required_targets":[]}}',
+        "senior_staff_engineer": '{"schema_version":"1.0","role":"senior_staff_engineer","action":"PASS","summary":"strategy completed","risk_level":"medium","blocking":false,"blocking_summary":[],"fix_scope":"","files_to_change":[],"validation_strategy":"","architect_waiver_candidate":false,"routing_hints":{"roles_required":{"architect":true,"qa":true,"reviewer":true},"reason":""}}',
+        "architect": '{"schema_version":"1.0","role":"architect","action":"PASS","summary":"plan ready","risk_level":"medium","blocking":false,"blocking_summary":[],"plan":{"files_to_change":[],"acceptance_criteria":[],"validation_plan":[]},"validation_profile":{"profile_id":"validation-profile-1","required_targets":[]}}',
+        "coder": '{"schema_version":"1.0","role":"coder","action":"PASS","summary":"implementation completed","risk_level":"medium","blocking":false,"blocking_summary":[],"change_set_id":"coder-1-attempt-1","files_changed":[],"self_validation":{"build_commands":[],"test_commands":[],"passed":false,"gaps":[]},"ready_for_qa":true}',
+        "qa": '{"schema_version":"1.0","role":"qa","action":"PASS","summary":"validation completed","risk_level":"low","blocking":false,"blocking_summary":[],"validated_change_set_id":"coder-1-attempt-1","validation":{"overall_status":"passed","validation_level":"targeted_unit","targets":[],"gaps":[],"build_ran":true,"build_passed":true,"tests_run":true,"tests_passed":true,"build_commands":[],"test_commands":[],"setup_commands":[],"install_commands":[]},"required_targets_passed":true,"blocking_gaps":[],"accepted_gaps":[],"ready_for_review":true}',
+        "reviewer": '{"schema_version":"1.0","role":"reviewer","action":"PASS","summary":"review passed","risk_level":"medium","blocking":false,"blocking_summary":[],"reviewed_change_set_id":"coder-1-attempt-1","review":{"diff_reviewed":true,"qa_evidence_reviewed":true,"qa_waiver_reviewed":false,"qa_evidence_accepted":true,"findings":[],"required_fixes":[],"publisher_ready":true},"validation_review":{"qa_build_evidence_ok":true,"qa_test_evidence_ok":true,"qa_validation_level_ok":true,"qa_skip_accepted":false,"lint_commands":[],"validation_gaps":[]}}',
+        "publisher": '{"schema_version":"1.0","role":"publisher","action":"PASS","summary":"PR created and checks handled","risk_level":"low","blocking":false,"blocking_summary":[],"publish":{"branch":"feature/example","commit":"","head_sha":"","base":"main","pr_number":0,"pr_url":"","pushed":true,"pr_created":true},"pr_checks":{"overall_status":"passed","head_sha":"","waited":true,"check_runs":[],"commit_status":{"state":"success","statuses":[]},"failing_checks":[],"pending_checks":[],"checked_at":""},"publisher_recommendation":{"ready_to_complete":true,"reason":""}}',
     }
-    default = f'''FINAL_ROLE_REPORT_JSON: {{"schema_version": "1.0", "role": "{role}", "action": "PASS", "summary": "", "risk_level": "medium", "blocking": false, "blocking_summary": []}}'''
-    example = examples.get(role, default)
+    example = examples.get(
+        role,
+        f'{{"schema_version":"1.0","role":"{role}","action":"PASS","summary":"","risk_level":"medium","blocking":false,"blocking_summary":[]}}',
+    )
     return f"""Structured report requirement:
 At the end of your answer, include exactly one machine-readable footer named FINAL_ROLE_REPORT_JSON.
-This footer is used by Team Lead for policy decisions. Do not rely on prose only. The JSON must be valid, compact enough to parse, and must reflect what you actually did.
+This footer is used by Team Lead for policy decisions. The JSON must be valid, compact, and reflect what you actually did.
 Common required keys: schema_version, role, action, summary, risk_level, blocking, blocking_summary.
-Example shape:
-{example}
-""".strip()
+Example shape: FINAL_ROLE_REPORT_JSON: {example}""".strip()
 
 
 def with_role_report_footer(role: str, prompt: str) -> str:
@@ -868,11 +858,10 @@ def _summary_schema_contract(role: str, guidance: str) -> str:
 No Markdown, no code fence, no prose before/after JSON.
 Required keys: valid, status, summary, action, risk_level, blocking, blocking_summary.
 Allowed risk_level values: low, medium, high, critical, null.
-The summary string must be concise, preferably under 900 characters. Escape all quotes correctly.
-Set blocking=true only for real blockers and put blocker details in blocking_summary.
+The summary string must be concise, preferably under 900 characters.
+Escape all quotes correctly. Set blocking=true only for real blockers and put blocker details in blocking_summary.
 {guidance}
-Example shape: {{"valid": true, "status": "completed", "summary": "...", "action": "PASS", "risk_level": "low", "blocking": false, "blocking_summary": []}}
-""".strip()
+Example shape: {{"valid": true, "status": "completed", "summary": "...", "action": "PASS", "risk_level": "low", "blocking": false, "blocking_summary": []}}"""
 
 
 def build_role_summary_instructions(role: str) -> str:
@@ -880,55 +869,49 @@ def build_role_summary_instructions(role: str) -> str:
     if role == "team_lead":
         return _summary_schema_contract(
             role,
-            "Team Lead action must be RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, or ASK_HUMAN. Include extra JSON keys: next_role, role_instance, context_sources, instructions, reason. next_role must be one of scout, research, senior_staff_engineer, architect, coder, qa, reviewer, publisher for RUN_ROLE/RETRY_ROLE; otherwise null. Do not execute work yourself.",
+            "Team Lead action must be RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, or ASK_HUMAN. Include extra JSON keys: next_role, role_instance, context_sources, instructions, reason, accepted_report_ids, policy_evaluation. next_role must be one of the allowed roles for RUN_ROLE/RETRY_ROLE; otherwise null. Do not execute work yourself.",
         )
     if role == "qa":
         return _summary_schema_contract(
             role,
-            "QA action must be PASS only when compilation/build and targeted test/smoke/integration validation actually ran and passed in a credible validation environment. Include extra key validation with build_ran, build_passed, tests_run, tests_passed, validation_level, install_commands, setup_commands, build_commands, test_commands, targets, gaps, and validation_gaps. Copy the validation object from the QA answer into this summary JSON exactly; do not omit it.",
+            "QA action must be PASS only when required validation actually passed, or when validation is genuinely not applicable to a low-risk non-code/non-runtime task and this is explicitly justified. Include extra key validation with build_ran, build_passed, tests_run, tests_passed, validation_level, install_commands, setup_commands, build_commands, test_commands, targets, gaps, and validation_gaps. Copy the validation object from the QA answer into this summary JSON; do not omit it.",
         )
     if role == "reviewer":
         return _summary_schema_contract(
             role,
-            "Reviewer action must be PASS, NEED_FIX, or BLOCKER. PASS requires QA PASS with credible build/test validation evidence plus independent code/diff review. Include extra key validation_review. Copy the validation_review object from the reviewer answer into this summary JSON exactly; do not omit it.",
+            "Reviewer action must be PASS, NEED_FIX, or BLOCKER. PASS requires independent diff review and relevant lightweight checks. If QA was skipped by Team Lead, include validation_review.qa_skip_accepted=true with a concrete reason and evidence; otherwise include QA evidence review fields. Include extra key validation_review and copy it from the reviewer answer.",
         )
     if role == "publisher":
         return _summary_schema_contract(
             role,
-            "Publisher action must be PASS only when a PR was created/found, the pushed branch/head SHA was identified, and either GitHub PR checks/statuses were discovered with gh, waited for with gh pr checks --watch or an equivalent bounded gh polling loop, completed successfully, and publishing is ready for Team Lead to stop; or no checks/statuses are configured for the repository after a short no-checks grace wait. Use PASS in the no-checks case only when pr_checks has overall_status=no_checks_found, checks_required=false, waited=true, no failing/pending checks, and a concrete no_checks_reason/evidence. Use NEED_FIX when PR checks/statuses fail, are cancelled, remain pending at timeout, checks are expected but no checks are found at timeout, or checks indicate code/test changes are required. Use BLOCKER when publishing/check discovery cannot proceed because of GitHub/GITHUB_TOKEN/gh/push blockers. Include extra key pr_checks with overall_status, checks_required, no_checks_reason, head_sha, waited, timeout_seconds, poll_interval_seconds, check_runs, commit_status, failing_checks, pending_checks, and checked_at. Copy the pr_checks object from the publisher answer into summary JSON exactly; do not omit it. PASS is invalid without pr_checks; PASS with no_checks_found is invalid unless checks_required=false and no failing/pending checks remain.",
+            "Publisher action must be PASS only when a PR was created/found, pushed branch/head SHA identified, and PR checks/statuses were handled with gh. If checks exist, they must pass. If no checks are configured/found, include pr_checks.overall_status='no_checks_configured' or 'no_checks_found', waited=true, head_sha, and evidence fields; Team Lead decides whether to accept. Include extra key pr_checks and copy it from the publisher answer.",
         )
     if role == "coder":
         return _summary_schema_contract(
             role,
-            "Use PASS only if implementation is ready for QA with compilation/build and targeted validation evidence, NEED_FIX if validation failed due to the change, or BLOCKER if implementation could not proceed. Include install commands, compile/build/test status, validation gaps, and remaining known issues.",
+            "Use PASS only if implementation is ready for the next selected gate with relevant self-validation evidence or a concrete statement that no meaningful validation exists. Include files_changed, install commands, validation gaps, and remaining known issues.",
         )
     if role == "senior_staff_engineer":
         return _summary_schema_contract(
             role,
-            "Senior Staff action must be PASS/PROCEED when the execution contract is ready for Architect, NEED_FIX/NEED_MORE_RESEARCH/NEED_MORE_SCOUT/ASK_HUMAN when more input is required, or BLOCKER when proceeding is unsafe. Include structured fields when available: root_cause, fix_scope, files_to_change, files_inspected, validation_strategy, confidence, architect_waiver_candidate, routing_hints, target_runtime_contract, assumption_ledger.",
+            "Senior Staff action must be PASS/PROCEED when the execution contract is ready, NEED_FIX/NEED_MORE_RESEARCH/NEED_MORE_SCOUT/ASK_HUMAN when more input is required, or BLOCKER when proceeding is unsafe. Include routing_hints for which roles are required/optional/unnecessary and why.",
         )
     if role == "architect":
         return _summary_schema_contract(
             role,
-            "Use PASS if the implementation plan is ready for coder, NEED_FIX if more scout/research information is required, or BLOCKER if planning is impossible. Include key files, environment/target-runtime contract, acceptance criteria, and validation plan. Do not claim that tests/builds were executed.",
+            "Use PASS if the implementation plan is ready for coder. Include key files, acceptance criteria, validation plan, and minimal required role evidence. Do not claim tests/builds were executed.",
         )
     if role == "research":
         return _summary_schema_contract(
             role,
-            "Use PASS if the research brief is sufficient for architect, NEED_FIX if Scout must provide clearer domains, or BLOCKER if required external research is impossible. Include covered domains, target-runtime constraints, portability risks, and validation implications. Do not claim repository tests/builds were executed.",
+            "Use PASS if the research brief is sufficient, NEED_FIX if Scout must provide clearer domains, or BLOCKER if required external research is impossible. Include covered domains, target-runtime constraints, portability risks, and validation implications.",
         )
     if role == "scout":
         return _summary_schema_contract(
             role,
-            "Use PASS if the facts-only scout context report is sufficient for routing, NEED_FIX if more read-only context discovery is needed, or BLOCKER if repository/workspace/log access is unavailable. Include structured research_required, research_domains, research_questions, factual failure evidence, relevant files, discovered validation commands, risks, unknowns, validation_questions, and routing_hints. Do not include root-cause hypotheses or claim that tests/builds were executed.",
+            "Use PASS if the facts-only context report is sufficient for routing, NEED_FIX if more read-only context is needed, or BLOCKER if repository/workspace/log access is unavailable. Include research_required, research_domains, research_questions, validation_profile, and routing_hints. Do not include root-cause hypotheses or claim tests/builds were executed.",
         )
     return _summary_schema_contract(role, "Use PASS, NEED_FIX, or BLOCKER according to the role result.")
-
-
-def normalize_action(action: Any) -> str:
-    if action is None:
-        return ""
-    return str(action).strip().upper().replace("-", "_").replace(" ", "_")
 
 
 def role_input_summary(role: str, state: JsonDict) -> list[str]:
@@ -936,22 +919,14 @@ def role_input_summary(role: str, state: JsonDict) -> list[str]:
     lines: list[str] = []
     task = state.get("user_task") or state.get("prompt") or ""
     if task:
-        short_task = str(task).replace("\n", " ")
-        if len(short_task) > 160:
-            short_task = short_task[:157] + "..."
-        lines.append(f"task: {short_task}")
-    if state.get("repository"):
-        lines.append(f"repository: {state.get('repository')}")
-    else:
-        lines.append("repository: not specified; using OpenHands-provided workspace if any")
-
+        lines.append(f"task: {_short(task, 160)}")
+    lines.append(f"repository: {state.get('repository') or 'not specified; using OpenHands-provided workspace if any'}")
     if role == "team_lead":
         lines.append(f"recorded workflow events: {len(state.get('role_results') or [])}")
         lines.append(f"step: {int(state.get('team_lead_steps') or 0)}/{int(state.get('max_team_lead_steps') or 12)}")
-        lines.append("mode: orchestration only; returns JSON decision; no commands/files/push")
+        lines.append("mode: orchestration only; flexible role selection; returns JSON decision")
     elif role == "scout":
-        lines.append("upstream: none")
-        lines.append("mode: read-only discovery; tests/builds/installers forbidden")
+        lines.append("mode: read-only facts/context discovery; tests/builds/installers forbidden")
     elif role == "research":
         scout = state.get("scout_result")
         lines.append(f"scout answer artifact: {_answer_len(scout)} chars")
@@ -959,55 +934,29 @@ def role_input_summary(role: str, state: JsonDict) -> list[str]:
             lines.append(f"scout routing summary: {_short(_summary_text(scout), 220)}")
         lines.append("mode: external best-practice research; repo changes/tests/builds/installers forbidden")
     elif role == "senior_staff_engineer":
-        scout = state.get("scout_result")
-        research = state.get("research_result")
-        lines.append(f"scout answer artifact: {_answer_len(scout)} chars")
-        lines.append(f"research brief artifact: {_answer_len(research)} chars")
-        lines.append("mode: senior strategy gate; execution contract + assumption ledger; no commands/installers")
+        lines.append(f"scout artifact: {_answer_len(state.get('scout_result'))} chars")
+        lines.append(f"research artifact: {_answer_len(state.get('research_result'))} chars")
+        lines.append("mode: strategy gate; role necessity guidance; no commands/installers")
     elif role == "architect":
-        scout = state.get("scout_result")
-        research = state.get("research_result")
-        senior = state.get("senior_staff_engineer_result")
-        lines.append(f"scout answer artifact: {_answer_len(scout)} chars")
-        lines.append(f"research brief artifact: {_answer_len(research)} chars")
-        lines.append(f"senior staff strategy artifact: {_answer_len(senior)} chars")
+        lines.append(f"scout artifact: {_answer_len(state.get('scout_result'))} chars")
+        lines.append(f"research artifact: {_answer_len(state.get('research_result'))} chars")
+        lines.append(f"senior staff artifact: {_answer_len(state.get('senior_staff_engineer_result'))} chars")
         lines.append("mode: read-only planning; tests/builds/installers forbidden")
     elif role == "coder":
-        senior = state.get("senior_staff_engineer_result")
-        architect = state.get("architect_result")
-        lines.append(f"senior staff strategy artifact: {_answer_len(senior)} chars")
-        lines.append(f"architect plan artifact: {_answer_len(architect)} chars")
+        lines.append(f"architect plan artifact: {_answer_len(state.get('architect_result'))} chars")
         lines.append(f"iteration: {int(state.get('current_iteration') or 0) + 1}")
-        lines.append("mode: implementation/validation in Debian Trixie Docker sandbox; install packages with sudo when needed")
+        lines.append("mode: implementation/self-validation; install packages with sudo when needed")
     elif role == "qa":
-        senior = state.get("senior_staff_engineer_result")
-        architect = state.get("architect_result")
-        coder = state.get("coder_result")
-        lines.append(f"senior staff strategy artifact: {_answer_len(senior)} chars")
-        lines.append(f"architect plan artifact: {_answer_len(architect)} chars")
-        if _summary_text(coder):
-            lines.append(f"coder routing summary only: {_short(_summary_text(coder), 220)}")
-        lines.append("mode: QA validation; install required utilities with sudo; compile/build and run targeted tests")
+        lines.append(f"coder summary: {_short(_summary_text(state.get('coder_result')), 220)}")
+        lines.append("mode: validation; can report not_applicable only for genuine low-risk non-runtime tasks")
     elif role == "reviewer":
-        senior = state.get("senior_staff_engineer_result")
-        architect = state.get("architect_result")
-        qa = state.get("qa_result")
-        lines.append(f"senior staff strategy artifact: {_answer_len(senior)} chars")
-        lines.append(f"architect plan artifact: {_answer_len(architect)} chars")
-        lines.append(f"qa validation artifact: {_answer_len(qa)} chars")
-        lines.append("mode: independent review after QA; install required linters/checkers with sudo; do not modify implementation files")
+        lines.append(f"coder summary: {_short(_summary_text(state.get('coder_result')), 220)}")
+        lines.append(f"qa artifact: {_answer_len(state.get('qa_result'))} chars")
+        lines.append("mode: independent review; handles QA evidence or explicit Team Lead QA waiver")
     elif role == "publisher":
-        senior = state.get("senior_staff_engineer_result")
-        architect = state.get("architect_result")
-        reviewer = state.get("reviewer_result")
-        qa = state.get("qa_result")
-        lines.append(f"senior staff strategy artifact: {_answer_len(senior)} chars")
-        lines.append(f"architect plan artifact: {_answer_len(architect)} chars")
-        if _summary_text(qa):
-            lines.append(f"qa routing summary: {_short(_summary_text(qa), 220)}")
-        if _summary_text(reviewer):
-            lines.append(f"reviewer routing summary: {_short(_summary_text(reviewer), 220)}")
-        lines.append("mode: inspect changes, push branch, create PR with curl + GITHUB_TOKEN, use gh for PR metadata/checks; PASS is allowed when no checks are configured and pr_checks.checks_required=false")
+        lines.append(f"qa summary: {_short(_summary_text(state.get('qa_result')), 220)}")
+        lines.append(f"reviewer summary: {_short(_summary_text(state.get('reviewer_result')), 220)}")
+        lines.append("mode: push branch, create/find PR, inspect/wait checks or structured no-checks evidence")
     else:
         lines.append("custom role prompt is passed as-is")
     return lines
