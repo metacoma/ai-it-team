@@ -83,11 +83,18 @@ def _load_role_model_config(config_path: str | None) -> dict[str, str] | None:
             paths_to_try.append(env_path)
         paths_to_try.extend([".openhands-role-models.yaml", "config.yaml"])
 
+    try:
+        import yaml
+    except ImportError:
+        yaml = None  # type: ignore[assignment]
+
     for path in paths_to_try:
         try:
             if not os.path.isfile(path):
                 continue
-            import yaml
+            if yaml is None:
+                logging.warning("PyYAML is not installed; cannot load role model config from %s", path)
+                continue
 
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
@@ -99,11 +106,8 @@ def _load_role_model_config(config_path: str | None) -> dict[str, str] | None:
                 elif roles:
                     logging.warning("YAML config 'roles' key is empty or not a dict: %s", path)
                     return None
-        except yaml.YAMLError as exc:  # noqa: F821
-            logging.warning("Failed to parse YAML config %s: %s", path, exc)
-            return None
-        except OSError as exc:
-            logging.warning("Failed to read YAML config %s: %s", path, exc)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Failed to load YAML config %s: %s", path, exc)
             return None
 
     return None

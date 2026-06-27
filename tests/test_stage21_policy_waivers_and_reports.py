@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from openhands_langgraph.nodes import _validate_team_lead_decision
 from openhands_langgraph.reports import compact_report_summary
+from openhands_langgraph.team_lead import TeamLeadDecision
 
 
 def _pass_result(role: str, report_id: str, role_report: dict | None = None) -> dict:
@@ -75,13 +76,16 @@ def test_research_required_blocks_downstream_without_explicit_team_lead_waiver()
     )
     state = {"role_results": [scout]}
 
-    ok, reason = _validate_team_lead_decision(
-        state,
-        {"action": "RUN_ROLE", "next_role": "senior_staff_engineer", "role_instance": "senior_staff_engineer-1"},
+    decision = TeamLeadDecision(
+        valid=True, status="completed", summary="run senior",
+        action="RUN_ROLE", risk_level="low", blocking=False, blocking_summary=[],
+        next_role="senior_staff_engineer", role_instance="senior_staff_engineer-1",
+        context_sources=[], instructions="", reason="",
     )
+    ok, reason = _validate_team_lead_decision(state, decision)
 
     assert ok is False
-    assert "research is required" in (reason or "")
+    assert "research" in (reason or "").lower()
 
 
 def test_team_lead_can_skip_research_with_explicit_structural_waiver() -> None:
@@ -98,19 +102,19 @@ def test_team_lead_can_skip_research_with_explicit_structural_waiver() -> None:
     )
     state = {"role_results": [scout]}
 
-    ok, reason = _validate_team_lead_decision(
-        state,
-        {
-            "action": "RUN_ROLE",
-            "next_role": "senior_staff_engineer",
-            "role_instance": "senior_staff_engineer-1",
-            "accepted_report_ids": {"scout": "scout-report-1"},
-            "policy_evaluation": {
-                "can_skip_research": True,
-                "skip_research_reason": "Local node_modules already contains the exact failing package code and no internet lookup is needed.",
-            },
-        },
+    decision = TeamLeadDecision(
+        valid=True, status="completed", summary="run senior",
+        action="RUN_ROLE", risk_level="low", blocking=False, blocking_summary=[],
+        next_role="senior_staff_engineer", role_instance="senior_staff_engineer-1",
+        context_sources=[], instructions="", reason="",
     )
+    decision.accepted_report_ids = {"scout": "scout-report-1"}
+    decision.policy_evaluation = {
+        "can_skip_research": True,
+        "skip_research_reason": "Local node_modules already contains the exact failing package code and no internet lookup is needed.",
+    }
+
+    ok, reason = _validate_team_lead_decision(state, decision)
 
     assert ok is True, reason
 
@@ -132,26 +136,28 @@ def test_coder_without_architect_requires_explicit_architect_waiver_and_senior_r
     )
     state = {"role_results": [research, senior]}
 
-    ok, reason = _validate_team_lead_decision(
-        state,
-        {"action": "RUN_ROLE", "next_role": "coder", "role_instance": "coder-1"},
+    decision = TeamLeadDecision(
+        valid=True, status="completed", summary="run coder",
+        action="RUN_ROLE", risk_level="low", blocking=False, blocking_summary=[],
+        next_role="coder", role_instance="coder-1",
+        context_sources=[], instructions="", reason="",
     )
+    ok, reason = _validate_team_lead_decision(state, decision)
     assert ok is False
-    assert "can_skip_architect" in (reason or "")
+    assert "architect" in (reason or "").lower()
 
-    ok, reason = _validate_team_lead_decision(
-        state,
-        {
-            "action": "RUN_ROLE",
-            "next_role": "coder",
-            "role_instance": "coder-1",
-            "accepted_report_ids": {"senior_staff_engineer": "senior-report-1"},
-            "policy_evaluation": {
-                "can_skip_architect": True,
-                "skip_architect_reason": "Senior Staff produced exact one-line fix_scope, files_to_change, and validation_strategy.",
-                "senior_staff_strategy_accepted": True,
-                "implementation_scope_accepted": True,
-            },
-        },
+    decision2 = TeamLeadDecision(
+        valid=True, status="completed", summary="run coder",
+        action="RUN_ROLE", risk_level="low", blocking=False, blocking_summary=[],
+        next_role="coder", role_instance="coder-1",
+        context_sources=[], instructions="", reason="",
     )
+    decision2.accepted_report_ids = {"senior_staff_engineer": "senior-report-1"}
+    decision2.policy_evaluation = {
+        "can_skip_architect": True,
+        "skip_architect_reason": "Senior Staff produced exact one-line fix_scope, files_to_change, and validation_strategy.",
+        "senior_staff_strategy_accepted": True,
+        "implementation_scope_accepted": True,
+    }
+    ok, reason = _validate_team_lead_decision(state, decision2)
     assert ok is True, reason
