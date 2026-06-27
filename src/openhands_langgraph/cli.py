@@ -60,6 +60,55 @@ def _count_role_actions(role_results: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _load_role_model_config(config_path: str | None) -> dict[str, str] | None:
+    """Load per-role model configuration from YAML file.
+
+    Discovery order:
+    1. Explicit path from config_path argument
+    2. OPENHANDS_CONFIG environment variable
+    3. ./.openhands-role-models.yaml
+    4. ./config.yaml
+
+    Returns the 'roles' dict from the YAML file, or None if not found/invalid.
+    """
+    import logging
+
+    paths_to_try: list[str] = []
+
+    if config_path:
+        paths_to_try.append(config_path)
+    else:
+        env_path = os.environ.get("OPENHANDS_CONFIG")
+        if env_path:
+            paths_to_try.append(env_path)
+        paths_to_try.extend([".openhands-role-models.yaml", "config.yaml"])
+
+    for path in paths_to_try:
+        try:
+            if not os.path.isfile(path):
+                continue
+            import yaml
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if isinstance(data, dict) and "roles" in data:
+                roles = data["roles"]
+                if isinstance(roles, dict) and roles:
+                    logging.info("Loaded role model config from %s", path)
+                    return {k: str(v) for k, v in roles.items() if v}
+                elif roles:
+                    logging.warning("YAML config 'roles' key is empty or not a dict: %s", path)
+                    return None
+        except yaml.YAMLError as exc:  # noqa: F821
+            logging.warning("Failed to parse YAML config %s: %s", path, exc)
+            return None
+        except OSError as exc:
+            logging.warning("Failed to read YAML config %s: %s", path, exc)
+            return None
+
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openhands-graph-run",
@@ -69,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--endpoint", required=True, help="OpenHands endpoint, for example http://127.0.0.1:3000")
     parser.add_argument("--api-key", default=os.environ.get("OPENHANDS_API_KEY"))
     parser.add_argument("--model", default=None, help="Optional OpenHands llm_model")
+    parser.add_argument("--config", default=None, help="Path to YAML config file with per-role model overrides")
     parser.add_argument("--team-lead-base-url", default=os.environ.get("TEAM_LEAD_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL") or os.environ.get("LITELLM_BASE_URL"), help="OpenAI-compatible base URL for tool-less Team Lead decisions, e.g. http://127.0.0.1:4000/v1")
     parser.add_argument("--team-lead-api-key", default=os.environ.get("TEAM_LEAD_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or os.environ.get("LITELLM_API_KEY"), help="API key for Team Lead LLM endpoint")
     parser.add_argument("--team-lead-model", default=os.environ.get("TEAM_LEAD_MODEL"), help="Model for tool-less Team Lead. Defaults to --model")
@@ -100,8 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
 async def _amain(args: argparse.Namespace) -> dict[str, Any]:
     instance = OpenHandsInstance(args.endpoint, api_key=args.api_key, default_model=args.model)
     runner = OpenHandsRoleRunner(instance, summary_max_attempts=args.summary_max_attempts)
+
+    # Load per-role model configuration from YAML file.
+    role_models = _load_role_model_config(args.config)
+
     graph = build_development_graph() if args.workflow == "development" else build_team_lead_graph() if args.workflow == "team-lead" else build_single_role_graph()
-    state = {
+    state: dict[str, Any] = {
         "workflow": args.workflow,
         "user_task": args.prompt,
         "role": args.role,
@@ -123,6 +177,8 @@ async def _amain(args: argparse.Namespace) -> dict[str, Any]:
             "raw_websocket": args.raw_websocket,
         },
     }
+    if role_models:
+        state["role_models"] = role_models
     started_at = _utc_now_iso()
     started_monotonic = time.monotonic()
     ui = None
