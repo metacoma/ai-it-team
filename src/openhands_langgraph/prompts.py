@@ -246,8 +246,7 @@ Global workflow rules:
 - LangGraph and Team Lead control role order. Do not launch, simulate, or claim later roles.
 - Do not take over the whole workflow.
 - Do not create pull requests unless your role explicitly says Publisher.
-- Repository access boundary: non-Publisher roles MAY clone/fetch/pull the requested repository for read or local-work purposes, including private repositories when a read-only credential such as `GITHUB_READ_TOKEN` is provided. They MUST NOT print credentials.
-- Publishing boundary is absolute: every non-Publisher role MUST NOT create branches for publication, commit, push, create or update pull requests, call GitHub write APIs, run `gh pr create`, run `git push`, or use `GITHUB_TOKEN` / any write-capable credential.
+- Publishing boundary is absolute: every non-Publisher role MUST NOT create branches for publication, commit, push, create or update pull requests, call GitHub write APIs, run `gh pr create`, run `git push`, or use `GITHUB_TOKEN`.
 - Be concrete and evidence-based: file paths, files inspected, commands inspected/run, observed results.
 - If you cannot determine something, say exactly what is unknown and why.
 - Avoid unrelated changes.""".strip()
@@ -461,7 +460,6 @@ Implement the requested change with the smallest safe diff while obeying the acc
 
 Do:
 - Use the available OpenHands workspace/repository context; do not assume a hard-coded checkout path.
-- If the repository is not already available and the task requires it, you may clone/fetch/pull it with public read access or a read-only credential such as `GITHUB_READ_TOKEN`; never print credentials.
 - Keep changes focused on the original task.
 - Add/update tests when appropriate for the scope.
 - Run the cheapest credible validation for your change: compile/build/test/lint/docs check as relevant.
@@ -469,8 +467,7 @@ Do:
 - Report exactly what changed and what validation passed/failed/skipped.
 
 Do not:
-- Create branches for publication, commit, push, create/update PRs, use `GITHUB_TOKEN` or any write-capable GitHub credential, call GitHub write APIs, run `gh pr create`, run `git push`, hide failed validation, or claim readiness without evidence.
-- If the repository requires authentication, use only read-only repository access for clone/fetch/pull; if only a write-capable token is available, report a concrete blocker instead of using it.
+- Create branches for publication, commit, push, create/update PRs, use `GITHUB_TOKEN`, call GitHub write APIs, run `gh pr create`, run `git push`, hide failed validation, or claim readiness without evidence.
 - If the original user task asks for a tarball, ready files, local edits, analysis, or any non-publishing artifact, stop at workspace changes and report them; Publisher is the only role that may publish remotely.
 
 Output contract:
@@ -731,15 +728,22 @@ Current workflow step: {steps}/{max_steps}
 Workflow history:
 {_team_lead_history_sections(state)}
 
-Allowed specialist roles:
-- scout: read-only repository/workspace/log context discovery; facts only.
-- research: external best-practice / target-runtime research.
-- senior_staff_engineer: execution contract, assumption ledger, strategy gate.
-- architect: read-only implementation plan.
-- coder: modify files and perform relevant self-validation.
-- qa: validation engineer; compile/build/run targeted checks when materially useful.
-- reviewer: independent review of actual diff, validation evidence or explicit QA waiver, and code quality.
-- publisher: inspect final changes, push branch, create/find GitHub PR, inspect/wait for PR checks/statuses.
+Allowed specialist roles / capability matrix:
+- scout: read-only repository/workspace/log context discovery; facts only; no writes, tests, builds, installs, commits, pushes, or PRs.
+- research: external best-practice / target-runtime research; no repository writes, tests, builds, installs, commits, pushes, or PRs.
+- senior_staff_engineer: execution contract, assumption ledger, strategy gate; no repository writes, tests, builds, installs, commits, pushes, or PRs.
+- architect: read-only implementation plan; no repository writes, tests, builds, installs, commits, pushes, or PRs.
+- coder: local implementation and relevant self-validation; may modify workspace files; must not create branches for publication, commit, push, create/update PRs, or use GitHub write credentials.
+- qa: validation engineer; compile/build/run targeted checks when materially useful; no implementation, commits, pushes, or PRs.
+- reviewer: independent review of actual diff, validation evidence or explicit QA waiver, and code quality; no implementation, commits, pushes, or PRs.
+- publisher: the only role allowed to commit/push/publish, create/find GitHub PRs, and inspect/wait for PR checks/statuses.
+
+Current-role assignment boundary:
+- `instructions` must contain only work that the selected `next_role` is allowed to perform now.
+- Do not put future workflow steps into `instructions`; put them only into `future_workflow_plan`.
+- For every non-Publisher role, `instructions` must not ask for commit, branch creation for publication, push, PR / pull request creation or update, `gh pr`, GitHub write API calls, `GITHUB_TOKEN`, or any write-capable credential.
+- If publishing is needed, mention it only in `future_workflow_plan` and choose `publisher` later as a separate role after required evidence exists.
+- Before returning RUN_ROLE/RETRY_ROLE, compare `instructions` with the capability matrix and fill `assignment_scope_check`.
 
 Allowed actions:
 - RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, ASK_HUMAN.
@@ -757,6 +761,7 @@ Role-selection policy:
 - If skipping QA, set policy_evaluation.can_skip_qa=true, non-empty skip_qa_reason, accepted_report_ids.coder, and list the residual risk in accepted_risks.
 - Reviewer is normally required before publishing changed files. You may skip Reviewer only for no-op/informational workflows or extremely low-risk mechanical changes where publishing safety is already covered, and only with policy_evaluation.can_skip_reviewer=true plus skip_reviewer_reason.
 - Do not choose Publisher until you accepted either QA PASS or an explicit QA waiver, and either Reviewer PASS or an explicit Reviewer waiver, and set policy_evaluation.can_publish=true.
+- When the overall workflow may later need publishing, keep that as future workflow planning; never assign publishing actions to Coder/QA/Reviewer/Architect/Scout/Research/Senior Staff.
 - Publisher PASS is acceptable only with structured PR/check evidence. If checks exist, they must be successful. If no checks are configured/found, Publisher must report structured no-checks evidence; you may accept it by setting publisher_no_checks_accepted=true and publisher_pr_checks_accepted=true.
 - STOP_COMPLETED requires a Publisher report you accept: PR URL/head SHA and either successful checks or accepted structured no-checks evidence.
 - If the last specialist role failed before producing a usable result, retry that same role_instance when retryable, or ASK_HUMAN/STOP_BLOCKED when unsafe.
@@ -769,7 +774,7 @@ Policy evaluation guidance:
 - Do not claim a role completed just because you requested it earlier.
 
 Decision output requirements:
-When choosing RUN_ROLE/RETRY_ROLE, include next_role, role_instance, context_sources, instructions, and reason.
+When choosing RUN_ROLE/RETRY_ROLE, include next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, and reason.
 Recommended role_instance names: scout-1, research-1, senior_staff_engineer-1, architect-1, coder-1, qa-1, reviewer-1, publisher-1.
 
 Final line: TEAM_LEAD_STATUS: COMPLETE""".strip()
@@ -800,10 +805,17 @@ Required JSON keys:
 - next_role: scout | research | senior_staff_engineer | architect | coder | qa | reviewer | publisher | null
 - role_instance: recommended role instance or null
 - context_sources: array of state/artifact names to pass
-- instructions: concise instructions for the selected specialist role
+- instructions: concise instructions for the selected specialist role only; no future-role work
+- future_workflow_plan: array of future workflow steps that must not be executed by the selected specialist role
+- assignment_scope_check: object with keys selected_role, instructions_contain_only_selected_role_work, future_work_not_instructions, publishing_actions_in_non_publisher_assignment, notes
 - reason: why this is the next safe step
 - accepted_report_ids: object with optional keys scout, research, senior_staff_engineer, architect, coder, qa, reviewer, publisher
-- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks""".strip()
+- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks
+
+For RUN_ROLE/RETRY_ROLE, invalid examples:
+- next_role=coder with instructions containing commit/push/create PR. Put those items in future_workflow_plan and run publisher later instead.
+- next_role=qa/reviewer with implementation or publishing tasks in instructions.
+- next_role=scout with implementation, root-cause hypotheses, tests, builds, or patch requests.""".strip()
 
 
 def role_report_footer(role: str) -> str:
@@ -874,7 +886,7 @@ def build_role_summary_instructions(role: str) -> str:
     if role == "team_lead":
         return _summary_schema_contract(
             role,
-            "Team Lead action must be RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, or ASK_HUMAN. Include extra JSON keys: next_role, role_instance, context_sources, instructions, reason, accepted_report_ids, policy_evaluation. next_role must be one of the allowed roles for RUN_ROLE/RETRY_ROLE; otherwise null. Do not execute work yourself.",
+            "Team Lead action must be RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, or ASK_HUMAN. Include extra JSON keys: next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, reason, accepted_report_ids, policy_evaluation. next_role must be one of the allowed roles for RUN_ROLE/RETRY_ROLE; otherwise null. instructions must contain only current selected-role work; future role steps go into future_workflow_plan. Do not execute work yourself.",
         )
     if role == "qa":
         return _summary_schema_contract(

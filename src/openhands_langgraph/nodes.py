@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -1288,6 +1289,69 @@ def _retry_same_role_required(state: OpenHandsGraphState, decision: TeamLeadDeci
     return True, None
 
 
+_NON_PUBLISHER_ROLES = TEAM_LEAD_ALLOWED_ROLES - {"publisher"}
+_PUBLISHING_INSTRUCTION_PATTERNS = [
+    re.compile(r"\bgit\s+push\b", re.IGNORECASE),
+    re.compile(r"\bgh\s+pr\b", re.IGNORECASE),
+    re.compile(r"\bcreate\s+(?:a\s+)?(?:pull\s+request|pr)\b", re.IGNORECASE),
+    re.compile(r"\bopen\s+(?:a\s+)?(?:pull\s+request|pr)\b", re.IGNORECASE),
+    re.compile(r"\bupdate\s+(?:a\s+)?(?:pull\s+request|pr)\b", re.IGNORECASE),
+    re.compile(r"\bpull\s+request\b", re.IGNORECASE),
+    re.compile(r"\bcommit\b", re.IGNORECASE),
+    re.compile(r"\bpush(?:ed|ing)?\b", re.IGNORECASE),
+    re.compile(r"\bcreate\s+(?:a\s+)?branch\b", re.IGNORECASE),
+    re.compile(r"\bnew\s+branch\b", re.IGNORECASE),
+    re.compile(r"\bgithub\s+write\s+api\b", re.IGNORECASE),
+    re.compile(r"\bGITHUB_TOKEN\b", re.IGNORECASE),
+    re.compile(r"\bwrite-capable\s+credential\b", re.IGNORECASE),
+]
+_NEGATED_INSTRUCTION_PATTERNS = [
+    re.compile(r"\b(do\s+not|don't|must\s+not|never|without|no)\b", re.IGNORECASE),
+]
+
+
+def _line_has_forbidden_publishing_instruction(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text:
+        return False
+    if not any(pattern.search(text) for pattern in _PUBLISHING_INSTRUCTION_PATTERNS):
+        return False
+    # A line like "do not push" is a boundary reminder, not a publishing assignment.
+    if any(pattern.search(text) for pattern in _NEGATED_INSTRUCTION_PATTERNS):
+        return False
+    return True
+
+
+def _assignment_scope_ok(decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    next_role = str(decision.next_role or "").strip().lower()
+    if not next_role or next_role not in _NON_PUBLISHER_ROLES:
+        return True, None
+
+    scope = getattr(decision, "assignment_scope_check", None)
+    publishing_flag = getattr(scope, "publishing_actions_in_non_publisher_assignment", None)
+    if publishing_flag is True:
+        return (
+            False,
+            f"Invalid Team Lead decision: next_role={next_role} cannot receive publishing instructions; "
+            "move commit/branch/push/PR/GitHub write work to future_workflow_plan and choose publisher later.",
+        )
+
+    instructions = str(getattr(decision, "instructions", "") or "")
+    bad_lines = [
+        line.strip()
+        for line in re.split(r"[\n;]+", instructions)
+        if _line_has_forbidden_publishing_instruction(line)
+    ]
+    if bad_lines:
+        return (
+            False,
+            f"Invalid Team Lead decision: next_role={next_role} instructions contain non-{next_role} publishing work: "
+            + "; ".join(bad_lines[:3])
+            + ". Keep instructions limited to current-role work and put future publishing steps in future_workflow_plan.",
+        )
+    return True, None
+
+
 def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
     action = normalize_action(decision.action)
     if action not in TEAM_LEAD_RUN_ACTIONS and action not in TEAM_LEAD_STOP_ACTIONS:
@@ -1316,6 +1380,10 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
 
     if not decision.next_role or decision.next_role not in TEAM_LEAD_ALLOWED_ROLES:
         return False, "RUN_ROLE/RETRY_ROLE requires supported next_role"
+
+    assignment_ok, assignment_error = _assignment_scope_ok(decision)
+    if not assignment_ok:
+        return False, assignment_error
 
     retry_ok, retry_error = _retry_same_role_required(state, decision)
     if not retry_ok:

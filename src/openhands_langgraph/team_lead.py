@@ -83,6 +83,23 @@ class TeamLeadAcceptedReportIds(BaseModel):
     publisher: str | None = None
 
 
+class TeamLeadAssignmentScopeCheck(BaseModel):
+    """Self-check that current-role instructions match the selected role capability.
+
+    This is intentionally declarative: LangGraph still validates the resulting
+    decision structurally and rejects unsafe cross-role assignments instead of
+    silently rewriting them.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    selected_role: str | None = None
+    instructions_contain_only_selected_role_work: bool | None = None
+    future_work_not_instructions: bool | None = None
+    publishing_actions_in_non_publisher_assignment: bool | None = None
+    notes: str | None = None
+
+
 class TeamLeadDecision(BaseModel):
     """Tool-less Team Lead routing decision."""
 
@@ -108,6 +125,8 @@ class TeamLeadDecision(BaseModel):
     role_instance: str | None = None
     context_sources: list[str] = Field(default_factory=list)
     instructions: str = ""
+    future_workflow_plan: list[str] = Field(default_factory=list)
+    assignment_scope_check: TeamLeadAssignmentScopeCheck = Field(default_factory=TeamLeadAssignmentScopeCheck)
     reason: str = ""
     accepted_report_ids: TeamLeadAcceptedReportIds = Field(default_factory=TeamLeadAcceptedReportIds)
     policy_evaluation: TeamLeadPolicyEvaluation = Field(default_factory=TeamLeadPolicyEvaluation)
