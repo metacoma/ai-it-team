@@ -383,3 +383,4 @@ See `docs/STAGE9_VALIDATION_ENVIRONMENT_RECONSTRUCTION.md` for the QA/Reviewer c
 ## Stage 10: Scout facts-only mode
 
 The Team Lead workflow now treats `scout` as a facts-only context discovery role. Scout must not propose root-cause hypotheses, candidate causes, or diagnostic conclusions. It reports exact CI/log evidence, relevant files, documented validation commands, research domains, risks, unknowns, and validation questions. Root-cause reasoning is left to Senior Staff, Architect, Coder, QA, and Reviewer after Scout has supplied factual context.
+# ai-it-team
