@@ -1,0 +1,22 @@
+{
+  "id": "publisher-failed-pr-checks-loop",
+  "description": "Publisher reports PR checks failed; Team Lead should treat PR checks as feedback and route corrective work, normally scout first if logs are not collected.",
+  "given": {
+    "publisher_report": {
+      "role": "publisher",
+      "action": "NEED_FIX",
+      "publish": {"pr_url": "https://github.com/o/r/pull/52", "head_sha": "abc"},
+      "pr_checks": {
+        "overall_status": "failed",
+        "waited": true,
+        "failing_checks": [{"name": "integration", "url": "https://github.com/o/r/actions/runs/1"}],
+        "pending_checks": []
+      },
+      "publisher_recommendation": {"recommended_next_role": "scout", "reason": "collect failed check logs"}
+    }
+  },
+  "expected_team_lead_behavior": {
+    "stop_completed": false,
+    "recommended_next_role": "scout"
+  }
+}

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.25", "editables>=0.5"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openhands-ws-cli"
+version = "0.44.0"
+description = "Small OpenHands V1 REST + websocket client and CLI watcher"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27",
+  "websockets>=13,<16",
+  "pydantic>=2.7,<3",
+  "rich>=13.7",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "aiohttp>=3.9",
+]
+langgraph = [
+  "langgraph>=0.2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[project.scripts]
+openhands-watch = "openhands.cli:main"
+openhands-role = "openhands.role_cli:main"
+openhands-graph-run = "openhands_langgraph.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openhands", "src/openhands_langgraph"]

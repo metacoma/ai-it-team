@@ -1,0 +1,16 @@
+{
+  "id": "research-required-waiver",
+  "description": "Scout marks research_required=true; Team Lead must either run research or explicitly waive it.",
+  "given": {
+    "scout_report": {
+      "role": "scout",
+      "action": "PASS",
+      "research_required": true,
+      "research_domains": ["@grpc/grpc-js compatibility"]
+    }
+  },
+  "expected_team_lead_behavior": {
+    "allowed_without_waiver": ["research"],
+    "requires_waiver_for": ["senior_staff_engineer", "architect", "coder"]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "qa-skipped-required-target",
+  "description": "QA says PASS but a validation_profile-required integration target was skipped/not_run.",
+  "given": {
+    "validation_profile": {
+      "profile_id": "vp-nodejs-freeplane",
+      "required_targets": [
+        {"name": "nodejs_unit_tests", "required": true, "required_by": "ci", "category": "unit"},
+        {"name": "nodejs_integration_tests", "required": true, "required_by": "ci", "category": "integration"}
+      ]
+    },
+    "qa_report": {
+      "role": "qa",
+      "action": "PASS",
+      "validation": {
+        "targets": [
+          {"name": "nodejs_unit_tests", "required": true, "status": "passed"},
+          {"name": "nodejs_integration_tests", "required": true, "status": "skipped", "reason": "no live server"}
+        ]
+      }
+    }
+  },
+  "expected_team_lead_behavior": {
+    "can_review": false,
+    "recommended_next_role": "qa",
+    "reason_contains": "required target skipped"
+  }
+}
