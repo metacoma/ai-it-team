@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
+
+from rich.console import Console
+from rich.table import Table
 
 from .client import OpenHandsError, load_json_object, run_prompt_and_watch
 
@@ -196,6 +200,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # Sandbox management commands.
+    sandbox_group = parser.add_mutually_exclusive_group()
+    sandbox_group.add_argument(
+        "--list-sandbox",
+        action="store_true",
+        help="List all OpenHands sandboxes in a table format.",
+    )
+    sandbox_group.add_argument(
+        "--send-to-sandbox",
+        nargs=2,
+        metavar=("SANDBOX_ID", "MESSAGE"),
+        help="Send a message to an active sandbox. Requires sandbox-id and message argument.",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=False,
+        help="Output in JSON format (used with --list-sandbox).",
+    )
+
     # Output / runtime controls.
     parser.add_argument(
         "--show-events",
@@ -265,8 +290,189 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _format_sandbox_table(sandboxes: list[dict]) -> str:
+    """Format sandbox list as a Rich table."""
+    from io import StringIO
+    
+    output = StringIO()
+    console = Console(file=output, force_terminal=True)
+    table = Table(show_header=True, header_style="bold magenta", show_lines=True)
+    
+    # Add columns for common sandbox fields
+    table.add_column("ID", style="cyan", min_width=36)
+    table.add_column("Status", style="green")
+    table.add_column("Created At", style="yellow")
+    table.add_column("Updated At", style="yellow")
+    table.add_column("Type", style="blue")
+    table.add_column("Model", style="magenta")
+    table.add_column("Error", style="red")
+    
+    for sb in sandboxes:
+        # Extract common fields with safe defaults
+        sb_id = str(sb.get("id") or "N/A")
+        status = str(sb.get("status") or "unknown")
+        created_at = str(sb.get("created_at") or sb.get("createdAt") or "N/A")
+        updated_at = str(sb.get("updated_at") or sb.get("updatedAt") or "N/A")
+        sb_type = str(sb.get("type") or sb.get("sandbox_type") or "N/A")
+        model = str(sb.get("llm_model") or sb.get("model") or "N/A")
+        error = str(sb.get("error") or sb.get("error_message") or "")
+        
+        # Truncate long IDs for display
+        if len(sb_id) > 40:
+            sb_id = sb_id[:37] + "..."
+        
+        table.add_row(sb_id, status, created_at, updated_at, sb_type, model, error)
+    
+    console.print(table)
+    return output.getvalue()
+
+
+async def cmd_list_sandboxes(client: "OpenHandsClient", json_output: bool) -> int:
+    """List all sandboxes, either as table or JSON."""
+    try:
+        sandboxes = await client.list_sandboxes(json_output=json_output)
+    except OpenHandsError as exc:
+        raise OpenHandsError(f"Failed to list sandboxes: {exc}") from exc
+    
+    # Enrich sandboxes with model information from conversations
+    # Model name is per-conversation, not per-sandbox, so we fetch it from the first conversation
+    for sb in sandboxes:
+        sb_id = sb.get("id")
+        if sb_id:
+            try:
+                conversations = await client.search_conversations_by_sandbox(sb_id)
+                if conversations:
+                    # Get the first (most recent) conversation
+                    conv = conversations[0]
+                    # Check if model is already in sandbox data
+                    if "llm_model" not in sb and "model" not in sb:
+                        model = conv.get("llm_model") or conv.get("model")
+                        if model:
+                            sb["llm_model"] = model
+            except OpenHandsError:
+                # If we can't fetch conversations, just skip model enrichment
+                pass
+    
+    if json_output:
+        print(json.dumps(sandboxes, indent=2, default=str))
+    else:
+        if not sandboxes:
+            print("No sandboxes found.")
+        else:
+            table_str = _format_sandbox_table(sandboxes)
+            print(table_str)
+    
+    print(f"\nTotal: {len(sandboxes)} sandbox(es)", file=sys.stderr)
+    return 0
+
+
+async def cmd_send_to_sandbox(client: "OpenHandsClient", sandbox_id: str, message: str) -> int:
+    """Send a message to an active sandbox."""
+    print(f"[info] Searching for active conversation in sandbox: {sandbox_id}", file=sys.stderr)
+    
+    # Step 1: Find conversations for this sandbox
+    try:
+        conversations = await client.search_conversations_by_sandbox(sandbox_id)
+    except OpenHandsError as exc:
+        raise OpenHandsError(f"Failed to search conversations for sandbox {sandbox_id}: {exc}") from exc
+    
+    if not conversations:
+        print(
+            f"[warn] No active conversations found for sandbox {sandbox_id}. "
+            f"Please start a conversation first.",
+            file=sys.stderr,
+        )
+        return 1
+    
+    # Step 2: Use the first (most recent) conversation
+    conversation = conversations[0]
+    conversation_id = conversation.get("id") or conversation.get("conversation_id")
+    
+    if not conversation_id:
+        print(
+            f"[error] Could not extract conversation ID from sandbox search result: {conversation}",
+            file=sys.stderr,
+        )
+        return 1
+    
+    print(f"[info] Sending message to conversation {conversation_id}", file=sys.stderr)
+    
+    # Step 3: Send the message using POST /api/conversations/{id}/events
+    try:
+        from .client import OpenHandsClient
+        from .models import AppConversationStart
+        
+        # Create a proper AppConversationStart object with all required fields
+        conversation_obj = AppConversationStart(
+            conversation_id=conversation_id,
+            agent_server_url=None,
+            conversation_url=None,
+        )
+        
+        # We need to send a message event to the conversation
+        # This uses the same endpoint as follow-up messages
+        result = await client.send_message_to_existing_conversation(
+            conversation_obj,
+            message,
+            run=True,
+        )
+        print(f"[success] Message sent successfully to sandbox {sandbox_id}")
+        print(f"Conversation ID: {conversation_id}")
+        return 0
+    except OpenHandsError as exc:
+        raise OpenHandsError(f"Failed to send message to sandbox {sandbox_id}: {exc}") from exc
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    
+    # Handle sandbox management commands (these don't require --endpoint for listing,
+    # but do require it for sending messages)
+    if args.list_sandbox:
+        if not args.endpoint:
+            print("[error] --endpoint is required for --list-sandbox", file=sys.stderr)
+            raise SystemExit(1)
+        
+        try:
+            from .client import OpenHandsClient
+            client = OpenHandsClient(
+                endpoint=args.endpoint,
+                api_key=args.api_key,
+            )
+            exit_code = asyncio.run(cmd_list_sandboxes(client, json_output=args.json_output))
+            raise SystemExit(exit_code)
+        except OpenHandsError as exc:
+            print(f"openhands-watch: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        except KeyboardInterrupt:
+            raise SystemExit(130)
+    
+    if args.send_to_sandbox:
+        if not args.endpoint:
+            print("[error] --endpoint is required for --send-to-sandbox", file=sys.stderr)
+            raise SystemExit(1)
+        
+        if len(args.send_to_sandbox) != 2:
+            print("[error] --send-to-sandbox requires exactly 2 arguments: SANDBOX_ID MESSAGE", file=sys.stderr)
+            raise SystemExit(1)
+        
+        sandbox_id, message = args.send_to_sandbox
+        
+        try:
+            from .client import OpenHandsClient
+            client = OpenHandsClient(
+                endpoint=args.endpoint,
+                api_key=args.api_key,
+            )
+            exit_code = asyncio.run(cmd_send_to_sandbox(client, sandbox_id, message))
+            raise SystemExit(exit_code)
+        except OpenHandsError as exc:
+            print(f"openhands-watch: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        except KeyboardInterrupt:
+            raise SystemExit(130)
+    
+    # Normal conversation flow
     try:
         exit_code = asyncio.run(
             run_prompt_and_watch(

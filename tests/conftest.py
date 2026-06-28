@@ -67,6 +67,8 @@ class FakeOpenHandsServer:
     * POST /api/v1/app-conversations
     * GET  /api/v1/app-conversations/start-tasks
     * GET  /api/v1/app-conversations
+    * GET  /api/v1/sandboxes/search
+    * GET  /api/v1/app-conversations/search
     * POST /api/conversations/{conversation_id}/events
     * GET  /sockets/events/{conversation_id}
     """
@@ -85,6 +87,8 @@ class FakeOpenHandsServer:
     followup_payloads: list[JsonDict] = field(default_factory=list)
     websocket_connections: int = 0
     title: str | None = None
+    sandboxes: list[JsonDict] = field(default_factory=list)
+    sandbox_conversations: list[JsonDict] = field(default_factory=list)
 
     async def start(self) -> "FakeOpenHandsServer":
         app = web.Application()
@@ -92,6 +96,8 @@ class FakeOpenHandsServer:
         app.router.add_patch("/api/v1/app-conversations/{conversation_id}", self.handle_patch_app_conversation)
         app.router.add_get("/api/v1/app-conversations/start-tasks", self.handle_start_tasks)
         app.router.add_get("/api/v1/app-conversations", self.handle_get_app_conversation)
+        app.router.add_get("/api/v1/sandboxes/search", self.handle_list_sandboxes)
+        app.router.add_get("/api/v1/app-conversations/search", self.handle_search_conversations)
         app.router.add_route("*", "/api/conversations/{conversation_id}/events", self.handle_conversation_events)
         app.router.add_get("/api/conversations/{conversation_id}/messages", self.handle_conversation_messages)
         app.router.add_get("/api/conversations/{conversation_id}/state", self.handle_conversation_state)
@@ -147,6 +153,22 @@ class FakeOpenHandsServer:
 
     async def handle_get_app_conversation(self, request: web.Request) -> web.Response:
         return web.json_response([self.conversation_record()])
+
+    async def handle_list_sandboxes(self, request: web.Request) -> web.Response:
+        """Handle GET /api/v1/sandboxes/search"""
+        return web.json_response(self.sandboxes)
+
+    async def handle_search_conversations(self, request: web.Request) -> web.Response:
+        """Handle GET /api/v1/app-conversations/search?sandbox_id={id}"""
+        sandbox_id = request.query.get("sandbox_id")
+        if sandbox_id:
+            # Filter conversations for this sandbox
+            filtered = [
+                conv for conv in self.sandbox_conversations
+                if conv.get("sandbox_id") == sandbox_id
+            ]
+            return web.json_response(filtered)
+        return web.json_response(self.sandbox_conversations)
 
     async def handle_conversation_events(self, request: web.Request) -> web.Response:
         if request.method == "POST":

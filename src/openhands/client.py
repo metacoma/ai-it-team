@@ -462,6 +462,49 @@ class OpenHandsClient:
             return data
         return {"items": data}
 
+    async def list_sandboxes(self, *, json_output: bool = False) -> list[JsonDict]:
+        """List all sandboxes using GET /api/v1/sandboxes/search.
+
+        Returns a list of sandbox dictionaries with metadata like id, status,
+        created_at, updated_at, and other available fields.
+        """
+        data = await self._request("GET", "/api/v1/sandboxes/search")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            # Some implementations wrap results in a "items" or "data" key
+            if "items" in data and isinstance(data["items"], list):
+                return data["items"]
+            if "data" in data and isinstance(data["data"], list):
+                return data["data"]
+            # Single sandbox returned as dict
+            return [data]
+        return []
+
+    async def search_conversations_by_sandbox(
+        self,
+        sandbox_id: str,
+    ) -> list[JsonDict]:
+        """Search for conversations associated with a specific sandbox.
+
+        Uses GET /api/v1/app-conversations/search?sandbox_id={id}
+        Returns a list of conversation dictionaries.
+        """
+        data = await self._request(
+            "GET",
+            "/api/v1/app-conversations/search",
+            params={"sandbox_id": sandbox_id},
+        )
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            if "items" in data and isinstance(data["items"], list):
+                return data["items"]
+            if "data" in data and isinstance(data["data"], list):
+                return data["data"]
+            return [data]
+        return []
+
     async def try_update_app_conversation_title(
         self,
         conversation_id: str,
