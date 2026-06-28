@@ -550,7 +550,7 @@ def _postprocess_role_result(role: str, result_dict: JsonDict) -> JsonDict:
         result_dict["report_id"] = report.get("report_id") or str(fallback_report_id)
         if isinstance(report.get("validation_profile"), dict) and report.get("validation_profile"):
             summary.setdefault("validation_profile", report.get("validation_profile"))
-        for key in ("validation", "validation_review", "pr_checks", "publish", "files_changed", "routing_hints"):
+        for key in ("validation", "validation_review", "pr_checks", "publish", "publication", "files_changed", "routing_hints"):
             if key in report and report.get(key) not in (None, [], {}):
                 summary.setdefault(key, report.get(key))
     else:
@@ -565,10 +565,15 @@ def _postprocess_role_result(role: str, result_dict: JsonDict) -> JsonDict:
         validation_review = _extract_answer_object(result_dict, "validation_review")
         if validation_review:
             summary["validation_review"] = validation_review
-    elif role == "publisher" and not isinstance(summary.get("pr_checks"), dict):
-        pr_checks = _extract_answer_object(result_dict, "pr_checks")
-        if pr_checks:
-            summary["pr_checks"] = pr_checks
+    elif role == "publisher":
+        if not isinstance(summary.get("pr_checks"), dict):
+            pr_checks = _extract_answer_object(result_dict, "pr_checks")
+            if pr_checks:
+                summary["pr_checks"] = pr_checks
+        if not isinstance(summary.get("publication"), dict):
+            publication = _extract_answer_object(result_dict, "publication")
+            if publication:
+                summary["publication"] = publication
 
     result_dict["summary"] = summary
     if role == "qa" and isinstance(summary.get("validation"), dict):
@@ -1225,6 +1230,113 @@ def _publisher_publish(result: JsonDict | None) -> JsonDict:
     return {}
 
 
+
+
+def _publisher_publication(result: JsonDict | None) -> JsonDict:
+    if not isinstance(result, dict):
+        return {}
+    summary = _summary_dict(result)
+    for candidate in (
+        summary.get("publication"),
+        (result.get("role_report") or {}).get("publication") if isinstance(result.get("role_report"), dict) else None,
+        _extract_answer_object(result, "publication"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    publish = _publisher_publish(result)
+    if isinstance(publish, dict):
+        kind = str(publish.get("target_type") or publish.get("kind") or publish.get("type") or "").lower()
+        if kind and any(token in kind for token in ("comment", "discussion", "issue", "release")):
+            return publish
+    return {}
+
+
+def _publisher_publication_ok(result: JsonDict | None) -> tuple[bool, str | None]:
+    if not _role_action_pass(result):
+        return False, "Publisher did not return a usable PASS result"
+    publication = _publisher_publication(result)
+    if not publication:
+        return False, "Publisher PASS lacks structured publication evidence"
+
+    published = publication.get("published")
+    if published is None:
+        published = publication.get("created") or publication.get("updated") or publication.get("posted")
+    if not _truthy(published):
+        return False, "publication.published/created/updated must be true"
+
+    evidence_values = [
+        publication.get("artifact_url"),
+        publication.get("url"),
+        publication.get("html_url"),
+        publication.get("comment_url"),
+        publication.get("discussion_url"),
+        publication.get("artifact_id"),
+        publication.get("comment_id"),
+        publication.get("node_id"),
+        publication.get("id"),
+    ]
+    if not any(str(value or "").strip() for value in evidence_values):
+        return False, "Publication evidence requires artifact_url/url or artifact_id/comment_id/node_id"
+    return True, None
+
+
+def _work_order_dict(decision: TeamLeadDecision) -> JsonDict:
+    value = getattr(decision, "work_order", None)
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump(mode="python")
+        return dumped if isinstance(dumped, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def _work_order_surface(decision: TeamLeadDecision) -> str:
+    return str(_work_order_dict(decision).get("change_surface") or "repository").strip().lower()
+
+
+def _work_order_strategy(decision: TeamLeadDecision) -> str:
+    return str(_work_order_dict(decision).get("execution_strategy") or "repo_change").strip().lower()
+
+
+def _work_order_forbids_role(decision: TeamLeadDecision, role: str) -> bool:
+    work_order = _work_order_dict(decision)
+    forbidden = work_order.get("forbidden_roles")
+    if not isinstance(forbidden, list):
+        return False
+    return role in {str(item or "").strip().lower() for item in forbidden}
+
+
+def _has_discovery_evidence(state: OpenHandsGraphState) -> bool:
+    return bool(_latest_pass_result_for_role(state, "scout") or _latest_pass_result_for_role(state, "research"))
+
+
+def _external_publication_publisher_gate(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    policy = _decision_policy(decision)
+    if not _truthy(policy.get("can_publish")):
+        return False, "External publication Publisher requires policy_evaluation.can_publish=true"
+    if not (_truthy(policy.get("publication_target_verified")) or _truthy(policy.get("target_verified"))):
+        return False, "External publication Publisher requires publication_target_verified=true or target_verified=true"
+    if not (_truthy(policy.get("publication_content_reviewed")) or _truthy(policy.get("content_prepared"))):
+        return False, "External publication Publisher requires publication_content_reviewed=true or content_prepared=true"
+    if not _truthy(policy.get("no_repo_changes_accepted")):
+        return False, "External publication Publisher requires no_repo_changes_accepted=true"
+    if not _has_discovery_evidence(state):
+        if _truthy(policy.get("can_skip_discovery")) and _non_empty_string(policy.get("skip_discovery_reason")):
+            return True, None
+        return False, "External publication Publisher requires Scout/Research PASS or explicit discovery waiver"
+    return True, None
+
+
+def _external_publication_stop_gate(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    policy = _decision_policy(decision)
+    if not _truthy(policy.get("can_complete")):
+        return False, "STOP_COMPLETED requires policy_evaluation.can_complete=true"
+    if not _truthy(policy.get("publisher_publication_evidence_accepted")):
+        return False, "External publication STOP_COMPLETED requires publisher_publication_evidence_accepted=true"
+    publisher = _latest_pass_result_for_role(state, "publisher")
+    ok, reason = _publisher_publication_ok(publisher)
+    if not ok:
+        return False, reason
+    return True, None
+
 def _publisher_pr_checks_ok(result: JsonDict | None) -> tuple[bool, str | None, bool]:
     if not _role_action_pass(result):
         return False, "Publisher did not return a usable PASS result", False
@@ -1359,6 +1471,11 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return False, ids_error
 
     if action == "STOP_COMPLETED":
+        surface = _work_order_surface(decision)
+        strategy = _work_order_strategy(decision)
+        if surface == "external_publication" or strategy == "direct_external_api":
+            return _external_publication_stop_gate(state, decision)
+
         policy = _decision_policy(decision)
         if not _truthy(policy.get("can_complete")):
             return False, "STOP_COMPLETED requires policy_evaluation.can_complete=true"
@@ -1387,6 +1504,14 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return False, retry_error
 
     next_role = decision.next_role
+    if _work_order_forbids_role(decision, next_role):
+        return False, f"Work order forbids role: {next_role}"
+    surface = _work_order_surface(decision)
+    strategy = _work_order_strategy(decision)
+
+    if surface == "external_publication" and next_role in {"coder", "qa", "reviewer"}:
+        return False, f"External publication work order must not route to {next_role} unless repository changes are required"
+
     if next_role == "scout":
         return _enforce_scout_facts_only_decision(decision)
 
@@ -1409,6 +1534,8 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return _qa_skip_ok(state, decision)
 
     if next_role == "publisher":
+        if surface == "external_publication" or strategy == "direct_external_api":
+            return _external_publication_publisher_gate(state, decision)
         if not _latest_coder_pass_result(state):
             return False, "Publisher cannot run before a usable Coder PASS"
         qa_ok, qa_error = _qa_skip_ok(state, decision)

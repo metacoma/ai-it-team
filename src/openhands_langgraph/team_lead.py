@@ -44,6 +44,15 @@ class TeamLeadPolicyEvaluation(BaseModel):
     qa_evidence_accepted: bool | None = None
     reviewer_evidence_accepted: bool | None = None
     publisher_pr_checks_accepted: bool | None = None
+    publisher_publication_evidence_accepted: bool | None = None
+    external_publication_accepted: bool | None = None
+    publication_target_verified: bool | None = None
+    publication_content_reviewed: bool | None = None
+    no_repo_changes_accepted: bool | None = None
+    target_verified: bool | None = None
+    content_prepared: bool | None = None
+    can_skip_discovery: bool | None = None
+    skip_discovery_reason: str | None = None
     validation_profile_accepted: bool | None = None
     pr_feedback_accepted: bool | None = None
     corrective_loop_required: bool | None = None
@@ -100,6 +109,51 @@ class TeamLeadAssignmentScopeCheck(BaseModel):
     notes: str | None = None
 
 
+class TeamLeadWorkOrder(BaseModel):
+    """Task classification used by the policy-driven Team Lead router.
+
+    Work orders decouple the workflow from a fixed development chain. Existing
+    specialist roles are selected by capability and required evidence instead
+    of by ceremony. Unknown/extra fields are allowed so future roles and policy
+    surfaces can be introduced without breaking older clients.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    intent: str | None = None
+    target_system: str | None = None
+    change_surface: Literal[
+        "none",
+        "repository",
+        "external_publication",
+        "live_server",
+        "kubernetes_cluster",
+        "monitoring",
+        "database",
+        "network",
+        "security",
+        "unknown",
+    ] = "repository"
+    artifact_kind: str | None = None
+    execution_strategy: Literal[
+        "answer_only",
+        "repo_change",
+        "direct_external_api",
+        "direct_live_execution",
+        "iac_or_gitops",
+        "investigation_only",
+        "unknown",
+    ] = "repo_change"
+    risk_level: Literal["low", "medium", "high", "critical"] | None = None
+    requires_human_approval: bool | None = None
+    requires_rollback_plan: bool | None = None
+    requires_validation: bool | None = None
+    required_evidence: list[str] = Field(default_factory=list)
+    completed_evidence: list[str] = Field(default_factory=list)
+    forbidden_roles: list[str] = Field(default_factory=list)
+    preferred_roles: list[str] = Field(default_factory=list)
+
+
 class TeamLeadDecision(BaseModel):
     """Tool-less Team Lead routing decision."""
 
@@ -123,6 +177,8 @@ class TeamLeadDecision(BaseModel):
         "publisher",
     ] | None = None
     role_instance: str | None = None
+    work_order: TeamLeadWorkOrder = Field(default_factory=TeamLeadWorkOrder)
+    capabilities_required: list[str] = Field(default_factory=list)
     context_sources: list[str] = Field(default_factory=list)
     instructions: str = ""
     future_workflow_plan: list[str] = Field(default_factory=list)

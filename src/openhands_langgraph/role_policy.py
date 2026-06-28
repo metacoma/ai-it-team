@@ -14,7 +14,7 @@ JsonDict = dict[str, Any]
 # reviewer/publisher evidence gates, PR check validation, etc. Those gates
 # validate workflow state and evidence, not natural-language wording.
 
-ROLE_POLICY_HOOK_VERSION = 3
+ROLE_POLICY_HOOK_VERSION = 4
 
 ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
     "scout": frozenset(
@@ -25,6 +25,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "inspect_issue_metadata",
             "inspect_ci_metadata",
             "inspect_runtime_metadata",
+            "inspect_publication_target",
             "summarize_facts",
             "identify_research_domains",
             "identify_validation_targets",
@@ -38,6 +39,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "crawl_docs",
             "summarize_external_constraints",
             "summarize_best_practices",
+            "verify_external_api_contract",
             "report_unknowns",
         }
     ),
@@ -98,6 +100,11 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "monitor_workflow",
             "inspect_pr_checks",
             "classify_pr_check_failures",
+            "publish_comment",
+            "publish_discussion_comment",
+            "publish_issue_comment",
+            "publish_release_announcement",
+            "bounded_external_publication",
             "summarize_publish_result",
         }
     ),
@@ -119,9 +126,11 @@ Additional Team Lead assignment contract:
 - Do not rely on wording in instructions to express permissions or restrictions.
 - Natural-language instructions are not structurally rejected for mentioning repository concepts such as push events, commits, PRs, releases, fixes, build files, implementation history, or issue resolution.
 - Put future-role work in future_workflow_plan, but the deterministic validator will not reject current instructions by keyword.
-- Publisher normally follows implementation evidence from Coder/QA/Reviewer.
-- For tag-only/release-only/publish-only tasks where Scout confirms that no code changes are required, Team Lead may route directly to Publisher after Scout PASS.
-- Direct Publisher routing without Coder PASS requires structured policy_evaluation acceptance: can_publish=true, can_skip_qa=true, can_skip_reviewer=true, qa_evidence_accepted=true, and reviewer_evidence_accepted=true.
+- Team Lead must classify each task into work_order before routing specialist roles.
+- Publisher normally follows implementation evidence from Coder/QA/Reviewer for repository work orders.
+- For external_publication/direct_external_api tasks where repository changes are not required, Team Lead may route directly to Publisher after Scout/Research evidence is sufficient.
+- Direct external publication without Coder PASS requires structured work_order and policy_evaluation acceptance: can_publish=true, no_repo_changes_accepted=true, publication_target_verified/target_verified=true, and publication_content_reviewed/content_prepared=true.
+- Completion for external publication requires publisher_publication_evidence_accepted=true and structured publication evidence; it must not require PR/check evidence.
 """.strip()
 
 PUBLISHER_DIRECT_CODER_GATE_REASON = "Publisher cannot run before a usable Coder PASS"
@@ -160,14 +169,10 @@ def _decision_mapping(decision: Any) -> JsonDict:
     if isinstance(decision, dict):
         return dict(decision)
 
-    if hasattr(decision, "model_dump"):
-        try:
-            data = decision.model_dump(mode="python")
-            if isinstance(data, dict):
-                return dict(data)
-        except Exception:
-            pass
-
+    # Prefer direct attribute reads over model_dump(). Tests and runtime recovery
+    # may assign plain dicts to pydantic fields; model_dump emits serializer
+    # warnings for that compatibility path, while direct reads preserve exactly
+    # what the validator needs.
     data: JsonDict = {}
     for key in (
         "action",
@@ -177,6 +182,7 @@ def _decision_mapping(decision: Any) -> JsonDict:
         "policy_evaluation",
         "accepted_report_ids",
         "workflow_mode",
+        "work_order",
     ):
         if hasattr(decision, key):
             data[key] = getattr(decision, key)
@@ -184,6 +190,16 @@ def _decision_mapping(decision: Any) -> JsonDict:
     extra = getattr(decision, "model_extra", None)
     if isinstance(extra, dict):
         data.update(extra)
+
+    if data:
+        return data
+
+    if hasattr(decision, "model_dump"):
+        try:
+            dumped = decision.model_dump(mode="python")
+            return dict(dumped) if isinstance(dumped, Mapping) else {}
+        except Exception:
+            return {}
 
     return data
 
@@ -330,6 +346,17 @@ def _direct_publisher_without_coder_ok(
         return False, "Direct Publisher without Coder PASS requires a usable Scout PASS"
 
     policy = _decision_policy(decision)
+    if _is_external_publication_decision(decision):
+        required_policy_flags = ("can_publish", "no_repo_changes_accepted")
+        missing = [flag for flag in required_policy_flags if not _truthy(policy.get(flag))]
+        if not (_truthy(policy.get("publication_target_verified")) or _truthy(policy.get("target_verified"))):
+            missing.append("publication_target_verified|target_verified")
+        if not (_truthy(policy.get("publication_content_reviewed")) or _truthy(policy.get("content_prepared"))):
+            missing.append("publication_content_reviewed|content_prepared")
+        if missing:
+            return (False, "Direct external Publisher without Coder PASS missing policy_evaluation flags: " + ", ".join(missing))
+        return True, None
+
     required_policy_flags = (
         "can_publish",
         "can_skip_qa",
@@ -415,6 +442,64 @@ def _wrap_team_lead_decision_prompt_builder(original: Any) -> Any:
     _wrapped._role_policy_wrapped = True  # type: ignore[attr-defined]
     return _wrapped
 
+
+
+def publisher_has_structured_unrelated_check_failure(result: JsonDict | None) -> tuple[bool, str | None]:
+    """Return True when failed PR checks are explicitly attributed as unrelated.
+
+    This is intentionally conservative: a failed check can be accepted by policy
+    only if Publisher returned structured failure_analysis with change_related=false
+    and requires_coder_fix=false. Team Lead still decides whether to accept it.
+    """
+    if not isinstance(result, Mapping):
+        return False, "Publisher result is not a mapping"
+    summary = result.get("summary") if isinstance(result.get("summary"), Mapping) else {}
+    checks = summary.get("pr_checks")
+    if not isinstance(checks, Mapping):
+        report = result.get("role_report") if isinstance(result.get("role_report"), Mapping) else {}
+        checks = report.get("pr_checks") if isinstance(report.get("pr_checks"), Mapping) else {}
+    if not isinstance(checks, Mapping) or not checks:
+        return False, "Missing pr_checks"
+    failing = checks.get("failing_checks") or checks.get("failed_checks") or []
+    overall = str(checks.get("overall_status") or checks.get("status") or "").strip().lower()
+    if not failing and overall not in {"failed", "failure", "error"}:
+        return False, "No failed checks were reported"
+    analysis = checks.get("failure_analysis")
+    if not isinstance(analysis, Mapping):
+        return False, "Failed checks require structured failure_analysis"
+    change_related = analysis.get("change_related")
+    requires_coder_fix = analysis.get("requires_coder_fix")
+    classification = str(analysis.get("classification") or "").strip().lower()
+    evidence = analysis.get("evidence")
+    if change_related is False and requires_coder_fix is False and evidence and classification in {
+        "unrelated",
+        "pre_existing",
+        "pre-existing",
+        "pre_existing_codebase",
+        "external_flake",
+        "infra_flake",
+    }:
+        return True, "failed checks are structured as unrelated/pre-existing"
+    return False, "failure_analysis does not prove unrelated failed checks"
+
+
+def _decision_work_order(decision: Any) -> JsonDict:
+    data = _decision_mapping(decision)
+    value = data.get("work_order")
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump(mode="python")
+            return dict(dumped) if isinstance(dumped, Mapping) else {}
+        except Exception:
+            return {}
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _is_external_publication_decision(decision: Any) -> bool:
+    work_order = _decision_work_order(decision)
+    surface = str(work_order.get("change_surface") or "").strip().lower()
+    strategy = str(work_order.get("execution_strategy") or "").strip().lower()
+    return surface == "external_publication" or strategy == "direct_external_api"
 
 def install_runtime_policy_hooks() -> None:
     """Install role-policy hooks and disable prose-based Team Lead gates.

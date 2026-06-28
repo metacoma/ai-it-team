@@ -655,7 +655,7 @@ Final line: REVIEWER_STATUS: COMPLETE""".strip()
 
 
 def build_publisher_prompt(state: JsonDict) -> str:
-    return f"""{common_role_header(state, role_title='Publisher / GitHub PR Publisher')}
+    return f"""{common_role_header(state, role_title='Publisher / Delivery Publisher')}
 
 {team_lead_assignment_context(state)}
 
@@ -675,15 +675,19 @@ Reviewer routing/status summary:
 
 {validation_profile_context(state)}
 
-Your responsibility: Inspect final repository changes, verify they match the task and accepted Team Lead policy, push a branch, create/find a GitHub PR using curl + GITHUB_TOKEN, then inspect PR checks with gh.
+Your responsibility depends on the accepted Team Lead work_order:
+- repository/repo_change: inspect final repository changes, verify they match the task and accepted Team Lead policy, push a branch, create/find a GitHub PR using curl + GITHUB_TOKEN, then inspect PR checks with gh.
+- external_publication/direct_external_api: perform only the bounded external publication requested by Team Lead, such as a GitHub Discussion/issue/release comment. Do not create helper scripts, commits, branches, pushes, or PRs unless Team Lead explicitly classifies the work_order as repository/repo_change.
 
 Publishing rules:
-- You are the only role allowed to push and create a PR.
+- You are the only role allowed to push, create a PR, or perform bounded external write/publication actions.
 - Use GITHUB_TOKEN from the environment. Never print or expose it.
 - Create a PR with curl against GitHub REST API; do not use gh pr create for creation.
 - Use gh for post-creation PR view/check/status operations.
 - If checks exist, wait for them with gh pr checks --watch or an equivalent bounded gh polling loop and report final status.
 - If no checks exist, do not invent CI success. Inspect whether the repo/branch actually has no check configuration/statuses, report structured pr_checks.overall_status="no_checks_configured" or "no_checks_found", waited=true, and include evidence.
+- For external_publication, return structured `publication` evidence with published=true and artifact_url/url or artifact_id/comment_id/node_id.
+- For repository publishing, return structured `publish` and `pr_checks` evidence.
 - Do not modify implementation code. Return NEED_FIX/BLOCKER if code changes are required.
 - Do not perform live docs lookup unless publishing behavior itself depends on current external API behavior not covered by prior roles.
 
@@ -694,6 +698,7 @@ ACTION: PASS, NEED_FIX, or BLOCKER
 ## Published Branch
 ## Commit
 ## Pull Request
+## External Publication
 ## PR Checks / Statuses
 ## Evidence Inspected
 ## Team Lead Policy / QA / Reviewer Constraint Check
@@ -758,6 +763,7 @@ def _team_lead_history_sections(state: JsonDict) -> str:
                 "validation",
                 "validation_review",
                 "pr_checks",
+                "publication",
             ):
                 if role_report.get(key) not in (None, [], {}):
                     compact[key] = role_report.get(key)
@@ -809,7 +815,7 @@ Allowed specialist roles / capability matrix:
 - coder: local implementation and relevant self-validation; may modify workspace files; must not create branches for publication, commit, push, create/update PRs, or use GitHub write credentials.
 - qa: validation engineer; compile/build/run targeted checks when materially useful; no implementation, commits, pushes, or PRs.
 - reviewer: independent review of actual diff, validation evidence or explicit QA waiver, and code quality; no implementation, commits, pushes, or PRs.
-- publisher: the only role allowed to commit/push/publish, create/find GitHub PRs, and inspect/wait for PR checks/statuses.
+- publisher: the only role allowed to commit/push/publish, create/find GitHub PRs, post bounded external comments/announcements when assigned, and inspect/wait for PR checks/statuses.
 
 Current-role assignment boundary:
 - `instructions` must contain only work that the selected `next_role` is allowed to perform now.
@@ -820,28 +826,33 @@ Current-role assignment boundary:
 Allowed actions:
 - RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, ASK_HUMAN.
 
-Role-selection policy:
-- Do not follow a fixed chain mechanically. Choose the smallest safe next role that reduces material uncertainty for this task.
-- Prefer Scout first when repository facts are missing. Scout must collect facts/context only.
+Work-order routing policy:
+- First classify the task into work_order. This workflow is an IT work-order engine, not a fixed development ceremony.
+- work_order.change_surface must describe what will change: none, repository, external_publication, live_server, kubernetes_cluster, monitoring, database, network, security, or unknown.
+- work_order.execution_strategy must describe how work is delivered: answer_only, repo_change, direct_external_api, direct_live_execution, iac_or_gitops, investigation_only, or unknown.
+- Choose the smallest safe role that can produce the next missing required_evidence item. A role may be selected only if it produces material evidence or performs an allowed mutation for this work_order.
+- Do not select roles for ceremony. Do not choose Coder unless repository files must be changed. Do not choose QA/Reviewer unless there is a concrete implementation/configuration artifact, validation gap, or risk decision to validate/review.
+- Prefer Scout first when repository/workspace/target facts are missing. Scout must collect facts/context only.
 - Prefer Research when external/tool/runtime documentation is needed, Scout reports research_required/research_domains, or implementation/review would otherwise rely on model memory for current external syntax/API behavior.
-- Prefer Senior Staff/Architect for uncertain, multi-file, public API, workflow, dependency, schema/proto, CI/runtime, deployment, security, or high-risk changes.
-- For very small low-risk changes, you may skip Research and/or Architect only with explicit waiver fields and accepted report ids.
-- After Coder, decide whether QA is needed.
-- Reviewer is normally required before publishing changed files.
-- Do not choose Publisher until you accepted either QA PASS or an explicit QA waiver, and either Reviewer PASS or an explicit Reviewer waiver, and set policy_evaluation.can_publish=true.
-- Publisher PASS is acceptable only with structured PR/check evidence. If checks exist, they must be successful. If no checks are configured/found, Publisher must report structured no-checks evidence; you may accept it by setting publisher_no_checks_accepted=true and publisher_pr_checks_accepted=true.
-- STOP_COMPLETED requires a Publisher report you accept: PR URL/head SHA and either successful checks or accepted structured no-checks evidence.
+- Prefer Senior Staff/Architect for uncertain, multi-file, public API, workflow, dependency, schema/proto, CI/runtime, deployment, security, or high-risk repository/live-infra changes.
+- For repository changes: keep the strict engineering path. After Coder, decide whether QA is needed. Do not choose Publisher until you accepted either QA PASS or an explicit QA waiver, and either Reviewer PASS or an explicit Reviewer waiver. Coder changes files, QA validates or is explicitly waived, Reviewer reviews or is explicitly waived, Publisher creates/fetches PR evidence, and STOP_COMPLETED requires publisher_pr_checks_accepted=true plus PR/check evidence.
+- For external_publication/direct_external_api tasks such as GitHub Discussion comments, issue comments, release announcements, or status updates: do not route to Coder merely to create a helper script; route to Publisher directly after Scout/Research evidence is sufficient. Publisher must return structured publication evidence, not PR checks.
+- For live_server/kubernetes_cluster/monitoring/database/network/security work: use the existing roles as capabilities for now. Require target verification, readonly discovery, explicit plan, rollback path for risky mutation, execution evidence, and independent validation evidence when available. If the safe role does not exist yet, ASK_HUMAN instead of forcing Coder.
+- Publisher PASS for repository changes is acceptable only with structured PR/check evidence. If checks exist, they must be successful. If no checks are configured/found, Publisher must report structured no-checks evidence; you may accept it by setting publisher_no_checks_accepted=true and publisher_pr_checks_accepted=true.
+- Publisher PASS for external_publication is acceptable only with structured publication evidence: publication.published=true and artifact_url/url or artifact_id/comment_id/node_id. Accept it by setting publisher_publication_evidence_accepted=true.
+- STOP_COMPLETED requires the evidence contract for the current work_order, not a fixed role chain.
 - If the last specialist role failed before producing a usable result, retry that same role_instance when retryable, or ASK_HUMAN/STOP_BLOCKED when unsafe.
 - If max steps is reached or the next safe role is unclear, choose ASK_HUMAN.
 
 Policy evaluation guidance:
+- Always include work_order and keep it consistent across decisions unless new evidence requires a change.
 - Use accepted_report_ids for every report you rely on.
 - For every skipped role, set the matching can_skip_* flag and reason.
 - Put rejected/accepted gaps in blocking_reasons and accepted_risks.
 - Do not claim a role completed just because you requested it earlier.
 
 Decision output requirements:
-When choosing RUN_ROLE/RETRY_ROLE, include next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, and reason.
+When choosing RUN_ROLE/RETRY_ROLE, include work_order, capabilities_required, next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, and reason.
 Recommended role_instance names: scout-1, research-1, senior_staff_engineer-1, architect-1, coder-1, qa-1, reviewer-1, publisher-1.
 
 Final line: TEAM_LEAD_STATUS: COMPLETE""".strip()
@@ -871,18 +882,21 @@ Required JSON keys:
 - blocking_summary: array of strings
 - next_role: scout | research | senior_staff_engineer | architect | coder | qa | reviewer | publisher | null
 - role_instance: recommended role instance or null
+- work_order: object with keys intent, target_system, change_surface, artifact_kind, execution_strategy, risk_level, requires_human_approval, requires_rollback_plan, requires_validation, required_evidence, completed_evidence, forbidden_roles, preferred_roles
+- capabilities_required: array of typed capabilities required from next_role, or []
 - context_sources: array of state/artifact names to pass
 - instructions: concise instructions for the selected specialist role only; no future-role work
 - future_workflow_plan: array of future workflow steps that must not be executed by the selected specialist role
 - assignment_scope_check: object with keys selected_role, instructions_contain_only_selected_role_work, future_work_not_instructions, publishing_actions_in_non_publisher_assignment, notes
 - reason: why this is the next safe step
 - accepted_report_ids: object with optional keys scout, research, senior_staff_engineer, architect, coder, qa, reviewer, publisher
-- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks
+- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, publisher_publication_evidence_accepted, external_publication_accepted, publication_target_verified, publication_content_reviewed, no_repo_changes_accepted, target_verified, content_prepared, can_skip_discovery, skip_discovery_reason, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks
 
 For RUN_ROLE/RETRY_ROLE, invalid examples:
 - next_role=coder with instructions containing commit/push/create PR. Put those items in future_workflow_plan and run publisher later instead.
 - next_role=qa/reviewer with implementation or publishing tasks in instructions.
-- next_role=scout with implementation, root-cause hypotheses, tests, builds, or patch requests.""".strip()
+- next_role=scout with implementation, root-cause hypotheses, tests, builds, or patch requests.
+- work_order.change_surface=external_publication with next_role=coder/qa/reviewer when no repository files need to change.""".strip()
 
 
 def role_report_footer(role: str) -> str:
@@ -970,7 +984,7 @@ def build_role_summary_instructions(role: str) -> str:
     if role == "publisher":
         return _summary_schema_contract(
             role,
-            "Publisher action must be PASS only when a PR was created/found, pushed branch/head SHA identified, and PR checks/statuses were handled with gh. If checks exist, they must pass. If no checks are configured/found, include pr_checks.overall_status='no_checks_configured' or 'no_checks_found', waited=true, head_sha, and evidence fields; Team Lead decides whether to accept. Include extra key pr_checks and copy it from the publisher answer.",
+            "Publisher action must be PASS only when the assigned delivery work is complete with structured evidence. For repository publishing: a PR was created/found, pushed branch/head SHA identified, and PR checks/statuses were handled with gh. If checks exist, they must pass. If no checks are configured/found, include pr_checks.overall_status='no_checks_configured' or 'no_checks_found', waited=true, head_sha, and evidence fields; Team Lead decides whether to accept. For external publication: include publication.published=true and artifact_url/url or artifact_id/comment_id/node_id. Include extra keys pr_checks and/or publication and copy them from the publisher answer.",
         )
     if role == "coder":
         return _summary_schema_contract(
