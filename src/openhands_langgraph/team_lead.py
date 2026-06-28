@@ -4,7 +4,7 @@ import json
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 JsonDict = dict[str, Any]
 
@@ -26,6 +26,40 @@ _ALLOWED_ROLES = {
     "publisher",
 }
 
+
+def _coerce_string_list(value: Any) -> list[str]:
+    """Accept common LLM list mistakes while keeping the public contract typed.
+
+    Local models often return comma-separated strings for fields that are
+    explicitly documented as arrays. Treat those as recoverable formatting
+    issues so the Team Lead can be normalized and structurally validated instead
+    of failing before policy checks run.
+    """
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return _coerce_string_list(parsed)
+        normalized = text.replace("\n", ",").replace(";", ",")
+        return [item.strip().strip("\"'") for item in normalized.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, str) and ("," in item or "\n" in item or ";" in item):
+                items.extend(_coerce_string_list(item))
+            elif item is not None:
+                items.append(str(item).strip())
+        return [item for item in items if item]
+    return [str(value).strip()] if str(value).strip() else []
 
 class TeamLeadPolicyEvaluation(BaseModel):
     """Structured rationale for Team Lead routing decisions.
@@ -77,6 +111,11 @@ class TeamLeadPolicyEvaluation(BaseModel):
     implementation_scope_accepted: bool | None = None
     blocking_reasons: list[str] = Field(default_factory=list)
     accepted_risks: list[str] = Field(default_factory=list)
+
+    @field_validator("blocking_reasons", "accepted_risks", mode="before")
+    @classmethod
+    def _coerce_policy_lists(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
 
 
 class TeamLeadAcceptedReportIds(BaseModel):
@@ -153,6 +192,17 @@ class TeamLeadWorkOrder(BaseModel):
     forbidden_roles: list[str] = Field(default_factory=list)
     preferred_roles: list[str] = Field(default_factory=list)
 
+    @field_validator(
+        "required_evidence",
+        "completed_evidence",
+        "forbidden_roles",
+        "preferred_roles",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_work_order_lists(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
+
 
 class TeamLeadDecision(BaseModel):
     """Tool-less Team Lead routing decision."""
@@ -186,6 +236,17 @@ class TeamLeadDecision(BaseModel):
     reason: str = ""
     accepted_report_ids: TeamLeadAcceptedReportIds = Field(default_factory=TeamLeadAcceptedReportIds)
     policy_evaluation: TeamLeadPolicyEvaluation = Field(default_factory=TeamLeadPolicyEvaluation)
+
+    @field_validator(
+        "blocking_summary",
+        "capabilities_required",
+        "context_sources",
+        "future_workflow_plan",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decision_lists(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
 
     def normalized(self) -> "TeamLeadDecision":
         data = self.model_dump(mode="python")
