@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 from .reports import compact_validation_profile
+from .role_catalog import TEAM_LEAD_ALLOWED_ROLES, capability_matrix_text, role_contract_footer
+from .work_order_policy import surface_policy_matrix_text
 
 JsonDict = dict[str, Any]
 
@@ -12,17 +14,6 @@ NEED_FIX_ACTIONS = {"NEED_FIX", "FIX", "REWORK", "RETRY", "NEED_MORE_RESEARCH", 
 BLOCK_ACTIONS = {"BLOCKER", "BLOCK", "FAILED", "FAIL"}
 TEAM_LEAD_RUN_ACTIONS = {"RUN_ROLE", "RETRY_ROLE"}
 TEAM_LEAD_STOP_ACTIONS = {"STOP_COMPLETED", "STOP_BLOCKED", "ASK_HUMAN"}
-TEAM_LEAD_ALLOWED_ROLES = {
-    "scout",
-    "research",
-    "senior_staff_engineer",
-    "architect",
-    "coder",
-    "qa",
-    "reviewer",
-    "publisher",
-}
-
 EXTERNAL_CURRENT_DOC_DOMAINS = (
     "external/current APIs, specs, CI syntax, package APIs, framework behavior, "
     "cloud APIs, Kubernetes specs, Docker Compose specs, Terraform providers, "
@@ -469,6 +460,7 @@ Role-flexibility guidance:
 - Specify which validation is actually required by the task and target runtime.
 - If full QA is likely unnecessary, explain the narrower evidence that would be sufficient and the residual risk.
 - If the plan depends on external/current API/spec/config behavior and Research did not verify it with local-docs/searxNcrawl, request Research instead of planning from model memory.
+- Assess documentation impact for every repository change. If public behavior, CLI, config, API/schema, CI/deployment workflow, user-visible output, examples, or installation changes, documentation is required. Name the exact docs targets. If docs are not required, state a concrete waiver reason.
 
 Output contract:
 # Architect Plan
@@ -479,6 +471,8 @@ Output contract:
 ## Key Decisions
 ## Implementation Plan
 ## Files To Change
+## Documentation Impact
+Include docs_required=true|false, docs_targets, and reason.
 ## Acceptance Criteria
 ## Validation Plan
 ## Minimal Required Role Evidence
@@ -523,6 +517,7 @@ Do:
 - Before creating or changing external config formats or APIs such as GitHub Actions, GitLab CI, Docker Compose, Kubernetes YAML, Terraform, Ansible, pyproject.toml, package.json scripts, CLI flags, or framework/package APIs, use local-docs MCP/searxNcrawl unless Research already supplied an official URL covering the exact point.
 - For docs lookup, search first with at most 3 results and crawl only one official/current page.
 - Add/update tests when appropriate for the scope.
+- Update documentation when the change affects public behavior, CLI/config/API/schema, CI/deployment workflow, installation, examples, user-visible output, or role/policy behavior. If docs are not required, record a concrete waiver reason.
 - Run the cheapest credible validation for your change: compile/build/test/lint/docs check as relevant.
 - Report exactly what changed and what validation passed/failed/skipped.
 
@@ -536,6 +531,8 @@ Output contract:
 ## Files Changed
 ## Docs Lookup Evidence
 Include docs_lookup_used, source URLs, and gaps when external/current behavior influenced the implementation.
+## Documentation Impact Evidence
+Include a JSON object named documentation with impact_assessed, required, updated, files, reason, and waiver_reason. Documentation is either updated or explicitly waived with a concrete reason.
 ## Implementation Details
 ## Environment / Tool Installation
 ## Validation Environment Setup
@@ -576,6 +573,7 @@ Validation policy:
 - Install reasonable missing validation tools with sudo when needed.
 - Do not use live docs lookup by default; use it only if validation depends on current external syntax/CLI behavior not already covered by Research/Coder URLs.
 - Do not skip runtime/smoke/integration/CI targets that are relevant to the task unless setup attempts produce a concrete blocker.
+- Check documentation consistency against the actual diff. If code/config/user-visible behavior changed, verify that relevant docs/examples/.env.sample/README entries were updated or that the docs waiver is concrete and valid.
 
 Output contract:
 # QA Report
@@ -590,6 +588,8 @@ RISK: LOW, MEDIUM, or HIGH
 ## Build / Compile Evidence
 ## Test / Smoke / Integration Evidence
 ## Docs Lookup Evidence If Used
+## Documentation Consistency Evidence
+Include a JSON object named documentation with impact_assessed, required, updated, files, reason, and waiver_reason. For required docs, files must list updated documentation files. For waived docs, waiver_reason must be concrete.
 ## Original Task Coverage
 ## Validation Evidence JSON
 Include {{"validation": {{"build_ran": bool, "build_passed": bool, "tests_run": bool, "tests_passed": bool, "validation_level": "ci_like|targeted_runtime|targeted_integration|targeted_unit|syntax_only|not_applicable|not_validated", "targets": [], "gaps": [], "validation_gaps": [], "build_commands": [], "test_commands": [], "setup_commands": [], "install_commands": []}}}}
@@ -632,6 +632,7 @@ Flexible QA policy:
 - When reviewing code/config that depends on external/current APIs or syntax, reuse Research/Coder cited official URLs first.
 - Only call local-docs/searxNcrawl if the implementation uses syntax or behavior not supported by cited sources, or if you see suspicious external API/spec/config usage.
 - Do not PASS if required runtime/smoke/integration/CI targets were skipped without concrete setup attempts.
+- Do not PASS if documentation impact was not assessed. If docs are required, verify the actual docs diff. If docs are waived, verify the waiver is concrete and the change is truly internal/non-user-facing.
 
 Output contract:
 # Reviewer Report
@@ -643,6 +644,8 @@ RISK: LOW, MEDIUM, or HIGH
 ## Evidence Reviewed
 ## Docs Verification Evidence
 Include docs_verification_used, source URLs, and any unsupported external assumptions.
+## Documentation Impact Review
+Include a JSON object named documentation with impact_assessed, required, updated, files, reason, and waiver_reason. This is a review of the actual diff, not just Coder's claim.
 ## QA Evidence / QA Waiver Review
 ## Independent Lint / Static Check Evidence
 ## Validation Review
@@ -655,7 +658,7 @@ Final line: REVIEWER_STATUS: COMPLETE""".strip()
 
 
 def build_publisher_prompt(state: JsonDict) -> str:
-    return f"""{common_role_header(state, role_title='Publisher / GitHub PR Publisher')}
+    return f"""{common_role_header(state, role_title='Publisher / Delivery Publisher')}
 
 {team_lead_assignment_context(state)}
 
@@ -675,16 +678,21 @@ Reviewer routing/status summary:
 
 {validation_profile_context(state)}
 
-Your responsibility: Inspect final repository changes, verify they match the task and accepted Team Lead policy, push a branch, create/find a GitHub PR using curl + GITHUB_TOKEN, then inspect PR checks with gh.
+Your responsibility depends on the accepted Team Lead work_order:
+- repository/repo_change: inspect final repository changes, verify they match the task and accepted Team Lead policy, push a branch, create/find a GitHub PR using curl + GITHUB_TOKEN, then inspect PR checks with gh.
+- external_publication/direct_external_api: perform only the bounded external publication requested by Team Lead, such as a GitHub Discussion/issue/release comment. Do not create helper scripts, commits, branches, pushes, or PRs unless Team Lead explicitly classifies the work_order as repository/repo_change.
 
 Publishing rules:
-- You are the only role allowed to push and create a PR.
+- You are the only role allowed to push, create a PR, or perform bounded external write/publication actions.
 - Use GITHUB_TOKEN from the environment. Never print or expose it.
 - Create a PR with curl against GitHub REST API; do not use gh pr create for creation.
 - Use gh for post-creation PR view/check/status operations.
 - If checks exist, wait for them with gh pr checks --watch or an equivalent bounded gh polling loop and report final status.
 - If no checks exist, do not invent CI success. Inspect whether the repo/branch actually has no check configuration/statuses, report structured pr_checks.overall_status="no_checks_configured" or "no_checks_found", waited=true, and include evidence.
-- Do not modify implementation code. Return NEED_FIX/BLOCKER if code changes are required.
+- For external_publication, return structured `publication` evidence with published=true and artifact_url/url or artifact_id/comment_id/node_id.
+- For repository publishing, verify that Team Lead accepted documentation impact evidence before pushing/creating PR. Return NEED_FIX/BLOCKER if documentation evidence is missing or invalid.
+- For repository publishing, return structured `publish` and `pr_checks` evidence.
+- Do not modify implementation code or documentation. Return NEED_FIX/BLOCKER if code or docs changes are required.
 - Do not perform live docs lookup unless publishing behavior itself depends on current external API behavior not covered by prior roles.
 
 Output contract:
@@ -694,6 +702,7 @@ ACTION: PASS, NEED_FIX, or BLOCKER
 ## Published Branch
 ## Commit
 ## Pull Request
+## External Publication
 ## PR Checks / Statuses
 ## Evidence Inspected
 ## Team Lead Policy / QA / Reviewer Constraint Check
@@ -758,6 +767,7 @@ def _team_lead_history_sections(state: JsonDict) -> str:
                 "validation",
                 "validation_review",
                 "pr_checks",
+                "publication",
             ):
                 if role_report.get(key) not in (None, [], {}):
                     compact[key] = role_report.get(key)
@@ -801,16 +811,9 @@ Current workflow step: {steps}/{max_steps}
 Workflow history:
 {_team_lead_history_sections(state)}
 
-Allowed specialist roles / capability matrix:
-- scout: read-only repository/workspace/log context discovery; facts only; no writes, tests, builds, installs, commits, pushes, or PRs.
-- research: external best-practice / target-runtime research; uses local-docs/searxNcrawl when current docs matter; no repository writes, tests, builds, installs, commits, pushes, or PRs.
-- senior_staff_engineer: execution contract, assumption ledger, strategy gate; no repository writes, tests, builds, installs, commits, pushes, or PRs.
-- architect: read-only implementation plan; no repository writes, tests, builds, installs, commits, pushes, or PRs.
-- coder: local implementation and relevant self-validation; may modify workspace files; must not create branches for publication, commit, push, create/update PRs, or use GitHub write credentials.
-- qa: validation engineer; compile/build/run targeted checks when materially useful; no implementation, commits, pushes, or PRs.
-- reviewer: independent review of actual diff, validation evidence or explicit QA waiver, and code quality; no implementation, commits, pushes, or PRs.
-- publisher: the only role allowed to commit/push/publish, create/find GitHub PRs, and inspect/wait for PR checks/statuses.
+{capability_matrix_text()}
 
+{surface_policy_matrix_text()}
 Current-role assignment boundary:
 - `instructions` must contain only work that the selected `next_role` is allowed to perform now.
 - Do not put future workflow steps into `instructions`; put them only into `future_workflow_plan`.
@@ -820,28 +823,34 @@ Current-role assignment boundary:
 Allowed actions:
 - RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, ASK_HUMAN.
 
-Role-selection policy:
-- Do not follow a fixed chain mechanically. Choose the smallest safe next role that reduces material uncertainty for this task.
-- Prefer Scout first when repository facts are missing. Scout must collect facts/context only.
+Work-order routing policy:
+- First classify the task into work_order. This workflow is an IT work-order engine, not a fixed development ceremony.
+- work_order.change_surface must describe what will change: none, repository, external_publication, live_server, kubernetes_cluster, monitoring, database, network, security, or unknown.
+- work_order.execution_strategy must describe how work is delivered: answer_only, repo_change, direct_external_api, direct_live_execution, iac_or_gitops, investigation_only, or unknown.
+- Choose the smallest safe role that can produce the next missing required_evidence item. A role may be selected only if it produces material evidence or performs an allowed mutation for this work_order.
+- Do not select roles for ceremony. Do not choose Coder unless repository files must be changed. Do not choose QA/Reviewer unless there is a concrete implementation/configuration artifact, validation gap, or risk decision to validate/review.
+- Prefer Scout first when repository/workspace/target facts are missing. Scout must collect facts/context only.
 - Prefer Research when external/tool/runtime documentation is needed, Scout reports research_required/research_domains, or implementation/review would otherwise rely on model memory for current external syntax/API behavior.
-- Prefer Senior Staff/Architect for uncertain, multi-file, public API, workflow, dependency, schema/proto, CI/runtime, deployment, security, or high-risk changes.
-- For very small low-risk changes, you may skip Research and/or Architect only with explicit waiver fields and accepted report ids.
-- After Coder, decide whether QA is needed.
-- Reviewer is normally required before publishing changed files.
-- Do not choose Publisher until you accepted either QA PASS or an explicit QA waiver, and either Reviewer PASS or an explicit Reviewer waiver, and set policy_evaluation.can_publish=true.
-- Publisher PASS is acceptable only with structured PR/check evidence. If checks exist, they must be successful. If no checks are configured/found, Publisher must report structured no-checks evidence; you may accept it by setting publisher_no_checks_accepted=true and publisher_pr_checks_accepted=true.
-- STOP_COMPLETED requires a Publisher report you accept: PR URL/head SHA and either successful checks or accepted structured no-checks evidence.
+- Prefer Senior Staff/Architect for uncertain, multi-file, public API, workflow, dependency, schema/proto, CI/runtime, deployment, security, or high-risk repository/live-infra changes.
+- For repository changes: keep the strict engineering path. After Coder, decide whether QA is needed. Do not choose Publisher until you accepted either QA PASS or an explicit QA waiver, and either Reviewer PASS or an explicit Reviewer waiver. Coder changes files, QA validates or is explicitly waived, Reviewer reviews or is explicitly waived, Publisher creates/fetches PR evidence, and STOP_COMPLETED requires publisher_pr_checks_accepted=true plus PR/check evidence.
+- For repository changes, documentation is mandatory as a gate: documentation impact must be assessed, then documentation must be updated or explicitly waived with a concrete reason. Set policy_evaluation.documentation_impact_assessed=true and documentation_updated_or_waived=true only when structured role evidence supports it. Do not publish or complete repository work without this evidence.
+- For external_publication/direct_external_api tasks such as GitHub Discussion comments, issue comments, release announcements, or status updates: do not route to Coder merely to create a helper script; route to Publisher directly after Scout/Research evidence is sufficient. Publisher must return structured publication evidence, not PR checks.
+- For live_server/kubernetes_cluster/monitoring/database/network/security work: use the existing roles as capabilities for now. Require target verification, readonly discovery, explicit plan, rollback path for risky mutation, execution evidence, and independent validation evidence when available. If the safe role does not exist yet, ASK_HUMAN instead of forcing Coder.
+- Publisher PASS for repository changes is acceptable only with structured PR/check evidence. If checks exist, they must be successful. If no checks are configured/found, Publisher must report structured no-checks evidence; you may accept it by setting publisher_no_checks_accepted=true and publisher_pr_checks_accepted=true.
+- Publisher PASS for external_publication is acceptable only with structured publication evidence: publication.published=true and artifact_url/url or artifact_id/comment_id/node_id. Accept it by setting publisher_publication_evidence_accepted=true.
+- STOP_COMPLETED requires the evidence contract for the current work_order, not a fixed role chain.
 - If the last specialist role failed before producing a usable result, retry that same role_instance when retryable, or ASK_HUMAN/STOP_BLOCKED when unsafe.
 - If max steps is reached or the next safe role is unclear, choose ASK_HUMAN.
 
 Policy evaluation guidance:
+- Always include work_order and keep it consistent across decisions unless new evidence requires a change.
 - Use accepted_report_ids for every report you rely on.
 - For every skipped role, set the matching can_skip_* flag and reason.
 - Put rejected/accepted gaps in blocking_reasons and accepted_risks.
 - Do not claim a role completed just because you requested it earlier.
 
 Decision output requirements:
-When choosing RUN_ROLE/RETRY_ROLE, include next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, and reason.
+When choosing RUN_ROLE/RETRY_ROLE, include work_order, capabilities_required, next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, and reason.
 Recommended role_instance names: scout-1, research-1, senior_staff_engineer-1, architect-1, coder-1, qa-1, reviewer-1, publisher-1.
 
 Final line: TEAM_LEAD_STATUS: COMPLETE""".strip()
@@ -871,18 +880,21 @@ Required JSON keys:
 - blocking_summary: array of strings
 - next_role: scout | research | senior_staff_engineer | architect | coder | qa | reviewer | publisher | null
 - role_instance: recommended role instance or null
+- work_order: object with keys intent, target_system, change_surface, artifact_kind, execution_strategy, risk_level, requires_human_approval, requires_rollback_plan, requires_validation, required_evidence, completed_evidence, forbidden_roles, preferred_roles, documentation_required, documentation_reason, documentation_targets
+- capabilities_required: array of typed capabilities required from next_role, or []
 - context_sources: array of state/artifact names to pass
 - instructions: concise instructions for the selected specialist role only; no future-role work
 - future_workflow_plan: array of future workflow steps that must not be executed by the selected specialist role
 - assignment_scope_check: object with keys selected_role, instructions_contain_only_selected_role_work, future_work_not_instructions, publishing_actions_in_non_publisher_assignment, notes
 - reason: why this is the next safe step
 - accepted_report_ids: object with optional keys scout, research, senior_staff_engineer, architect, coder, qa, reviewer, publisher
-- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks
+- policy_evaluation: object with keys can_review, can_publish, can_complete, qa_evidence_accepted, reviewer_evidence_accepted, publisher_pr_checks_accepted, publisher_no_checks_accepted, publisher_publication_evidence_accepted, external_publication_accepted, publication_target_verified, publication_content_reviewed, no_repo_changes_accepted, documentation_impact_assessed, documentation_updated_or_waived, documentation_required, documentation_updated, documentation_evidence_accepted, documentation_waiver_reason, target_verified, content_prepared, can_skip_discovery, skip_discovery_reason, validation_profile_accepted, pr_feedback_accepted, corrective_loop_required, can_skip_research, skip_research_reason, can_skip_architect, skip_architect_reason, can_skip_qa, skip_qa_reason, can_skip_reviewer, skip_reviewer_reason, scout_research_needed_accepted, senior_staff_strategy_accepted, implementation_scope_accepted, blocking_reasons, accepted_risks
 
 For RUN_ROLE/RETRY_ROLE, invalid examples:
 - next_role=coder with instructions containing commit/push/create PR. Put those items in future_workflow_plan and run publisher later instead.
 - next_role=qa/reviewer with implementation or publishing tasks in instructions.
-- next_role=scout with implementation, root-cause hypotheses, tests, builds, or patch requests.""".strip()
+- next_role=scout with implementation, root-cause hypotheses, tests, builds, or patch requests.
+- work_order.change_surface=external_publication with next_role=coder/qa/reviewer when no repository files need to change.""".strip()
 
 
 def role_report_footer(role: str) -> str:
@@ -891,10 +903,10 @@ def role_report_footer(role: str) -> str:
         "scout": '{"schema_version":"1.0","role":"scout","action":"PASS","summary":"facts-only context collected","risk_level":"medium","blocking":false,"blocking_summary":[],"research_required":false,"research_domains":[],"research_questions":[],"validation_profile":{"profile_id":"validation-profile-1","required_targets":[]},"routing_hints":{"recommended_next_role":"architect","roles_likely_needed":[]},"facts":{"relevant_files":[],"documented_commands":[],"unknowns":[],"validation_questions":[]}}',
         "research": '{"schema_version":"1.0","role":"research","action":"PASS","summary":"research completed","risk_level":"medium","blocking":false,"blocking_summary":[],"domains":[],"findings":[],"docs_lookup_used":true,"docs_sources":[],"docs_lookup_gaps":[],"current_docs_confidence":"high|medium|low|not_available","validation_profile":{"profile_id":"validation-profile-1","required_targets":[]}}',
         "senior_staff_engineer": '{"schema_version":"1.0","role":"senior_staff_engineer","action":"PASS","summary":"strategy completed","risk_level":"medium","blocking":false,"blocking_summary":[],"fix_scope":"","files_to_change":[],"validation_strategy":"","architect_waiver_candidate":false,"routing_hints":{"roles_required":{"architect":true,"qa":true,"reviewer":true},"reason":""}}',
-        "architect": '{"schema_version":"1.0","role":"architect","action":"PASS","summary":"plan ready","risk_level":"medium","blocking":false,"blocking_summary":[],"docs_sources_used":[],"plan":{"files_to_change":[],"acceptance_criteria":[],"validation_plan":[]},"validation_profile":{"profile_id":"validation-profile-1","required_targets":[]}}',
-        "coder": '{"schema_version":"1.0","role":"coder","action":"PASS","summary":"implementation completed","risk_level":"medium","blocking":false,"blocking_summary":[],"change_set_id":"coder-1-attempt-1","files_changed":[],"docs_lookup_used":false,"docs_sources":[],"self_validation":{"build_commands":[],"test_commands":[],"passed":false,"gaps":[]},"ready_for_qa":true}',
-        "qa": '{"schema_version":"1.0","role":"qa","action":"PASS","summary":"validation completed","risk_level":"low","blocking":false,"blocking_summary":[],"validated_change_set_id":"coder-1-attempt-1","docs_lookup_used":false,"docs_sources":[],"validation":{"overall_status":"passed","validation_level":"targeted_unit","targets":[],"gaps":[],"build_ran":true,"build_passed":true,"tests_run":true,"tests_passed":true,"build_commands":[],"test_commands":[],"setup_commands":[],"install_commands":[]},"required_targets_passed":true,"blocking_gaps":[],"accepted_gaps":[],"ready_for_review":true}',
-        "reviewer": '{"schema_version":"1.0","role":"reviewer","action":"PASS","summary":"review passed","risk_level":"medium","blocking":false,"blocking_summary":[],"reviewed_change_set_id":"coder-1-attempt-1","docs_verification_used":false,"docs_sources":[],"review":{"diff_reviewed":true,"qa_evidence_reviewed":true,"qa_waiver_reviewed":false,"qa_evidence_accepted":true,"findings":[],"required_fixes":[],"publisher_ready":true},"validation_review":{"qa_build_evidence_ok":true,"qa_test_evidence_ok":true,"qa_validation_level_ok":true,"qa_skip_accepted":false,"lint_commands":[],"validation_gaps":[]}}',
+        "architect": '{"schema_version":"1.0","role":"architect","action":"PASS","summary":"plan ready","risk_level":"medium","blocking":false,"blocking_summary":[],"docs_sources_used":[],"documentation":{"impact_assessed":true,"required":false,"updated":false,"files":[],"reason":"internal-only plan/no user-facing docs target","waiver_reason":"no user-facing behavior, config, CLI, API, deployment, or workflow change identified"},"plan":{"files_to_change":[],"acceptance_criteria":[],"validation_plan":[]},"validation_profile":{"profile_id":"validation-profile-1","required_targets":[]}}',
+        "coder": '{"schema_version":"1.0","role":"coder","action":"PASS","summary":"implementation completed","risk_level":"medium","blocking":false,"blocking_summary":[],"change_set_id":"coder-1-attempt-1","files_changed":[],"documentation":{"impact_assessed":true,"required":false,"updated":false,"files":[],"reason":"internal-only change","waiver_reason":"no user-facing behavior, config, CLI, API, deployment, workflow, examples, or installation docs changed"},"docs_lookup_used":false,"docs_sources":[],"self_validation":{"build_commands":[],"test_commands":[],"passed":false,"gaps":[]},"ready_for_qa":true}',
+        "qa": '{"schema_version":"1.0","role":"qa","action":"PASS","summary":"validation completed","risk_level":"low","blocking":false,"blocking_summary":[],"validated_change_set_id":"coder-1-attempt-1","docs_lookup_used":false,"docs_sources":[],"documentation":{"impact_assessed":true,"required":false,"updated":false,"files":[],"reason":"QA verified docs waiver against diff","waiver_reason":"change is internal-only and no docs target is affected"},"validation":{"overall_status":"passed","validation_level":"targeted_unit","targets":[],"gaps":[],"build_ran":true,"build_passed":true,"tests_run":true,"tests_passed":true,"build_commands":[],"test_commands":[],"setup_commands":[],"install_commands":[]},"required_targets_passed":true,"blocking_gaps":[],"accepted_gaps":[],"ready_for_review":true}',
+        "reviewer": '{"schema_version":"1.0","role":"reviewer","action":"PASS","summary":"review passed","risk_level":"medium","blocking":false,"blocking_summary":[],"reviewed_change_set_id":"coder-1-attempt-1","docs_verification_used":false,"docs_sources":[],"documentation":{"impact_assessed":true,"required":false,"updated":false,"files":[],"reason":"Reviewer verified docs impact against actual diff","waiver_reason":"no user-facing behavior, config, CLI, API, deployment, workflow, examples, or installation docs changed"},"review":{"diff_reviewed":true,"qa_evidence_reviewed":true,"qa_waiver_reviewed":false,"qa_evidence_accepted":true,"findings":[],"required_fixes":[],"publisher_ready":true},"validation_review":{"qa_build_evidence_ok":true,"qa_test_evidence_ok":true,"qa_validation_level_ok":true,"qa_skip_accepted":false,"lint_commands":[],"validation_gaps":[]}}',
         "publisher": '{"schema_version":"1.0","role":"publisher","action":"PASS","summary":"PR created and checks handled","risk_level":"low","blocking":false,"blocking_summary":[],"publish":{"branch":"feature/example","commit":"","head_sha":"","base":"main","pr_number":0,"pr_url":"","pushed":true,"pr_created":true},"pr_checks":{"overall_status":"passed","head_sha":"","waited":true,"check_runs":[],"commit_status":{"state":"success","statuses":[]},"failing_checks":[],"pending_checks":[],"checked_at":""},"publisher_recommendation":{"ready_to_complete":true,"reason":""}}',
     }
     example = examples.get(
@@ -912,7 +924,13 @@ FINAL_ROLE_REPORT_JSON: {example}""".strip()
 def with_role_report_footer(role: str, prompt: str) -> str:
     if (role or "").lower() == "team_lead":
         return prompt
-    return (prompt.rstrip() + "\n\n" + role_report_footer(role)).strip()
+    return (
+        prompt.rstrip()
+        + "\n\n"
+        + role_contract_footer(role)
+        + "\n\n"
+        + role_report_footer(role)
+    ).strip()
 
 
 def build_role_prompt(role: str, state: JsonDict) -> str:
@@ -955,27 +973,27 @@ def build_role_summary_instructions(role: str) -> str:
     if role == "team_lead":
         return _summary_schema_contract(
             role,
-            "Team Lead action must be RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, or ASK_HUMAN. Include extra JSON keys: next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, reason, accepted_report_ids, policy_evaluation. next_role must be one of the allowed roles for RUN_ROLE/RETRY_ROLE; otherwise null. instructions must contain only current selected-role work; future role steps go into future_workflow_plan. Do not execute work yourself.",
+            "Team Lead action must be RUN_ROLE, RETRY_ROLE, STOP_COMPLETED, STOP_BLOCKED, or ASK_HUMAN. Include extra JSON keys: work_order, capabilities_required, next_role, role_instance, context_sources, instructions, future_workflow_plan, assignment_scope_check, reason, accepted_report_ids, policy_evaluation. For repository changes after Coder PASS, include documentation policy fields and do not publish/complete unless documentation impact is assessed and updated or explicitly waived. next_role must be one of the allowed roles for RUN_ROLE/RETRY_ROLE; otherwise null. instructions must contain only current selected-role work; future role steps go into future_workflow_plan. Do not execute work yourself.",
         )
     if role == "qa":
         return _summary_schema_contract(
             role,
-            "QA action must be PASS only when required validation actually passed, or when validation is genuinely not applicable to a low-risk non-code/non-runtime task and this is explicitly justified. Include extra key validation with build_ran, build_passed, tests_run, tests_passed, validation_level, install_commands, setup_commands, build_commands, test_commands, targets, gaps, and validation_gaps. Include docs_lookup_used and docs_sources only when validation depended on current external documentation. Copy the validation object from the QA answer into this summary JSON; do not omit it.",
+            "QA action must be PASS only when required validation actually passed, or when validation is genuinely not applicable to a low-risk non-code/non-runtime task and this is explicitly justified. Include extra key validation with build_ran, build_passed, tests_run, tests_passed, validation_level, install_commands, setup_commands, build_commands, test_commands, targets, gaps, and validation_gaps. Include documentation with impact_assessed, required, updated, files, reason, and waiver_reason. Include docs_lookup_used and docs_sources only when validation depended on current external documentation. Copy the validation and documentation objects from the QA answer into this summary JSON; do not omit them.",
         )
     if role == "reviewer":
         return _summary_schema_contract(
             role,
-            "Reviewer action must be PASS, NEED_FIX, or BLOCKER. PASS requires independent diff review and relevant lightweight checks. If QA was skipped by Team Lead, include validation_review.qa_skip_accepted=true with a concrete reason and evidence; otherwise include QA evidence review fields. Include docs_verification_used and docs_sources when review accepted or rejected external/current API/spec/config behavior. Include extra key validation_review and copy it from the reviewer answer.",
+            "Reviewer action must be PASS, NEED_FIX, or BLOCKER. PASS requires independent diff review, relevant lightweight checks, and documentation impact review. If QA was skipped by Team Lead, include validation_review.qa_skip_accepted=true with a concrete reason and evidence; otherwise include QA evidence review fields. Include documentation with impact_assessed, required, updated, files, reason, and waiver_reason. Include docs_verification_used and docs_sources when review accepted or rejected external/current API/spec/config behavior. Include extra keys validation_review and documentation and copy them from the reviewer answer.",
         )
     if role == "publisher":
         return _summary_schema_contract(
             role,
-            "Publisher action must be PASS only when a PR was created/found, pushed branch/head SHA identified, and PR checks/statuses were handled with gh. If checks exist, they must pass. If no checks are configured/found, include pr_checks.overall_status='no_checks_configured' or 'no_checks_found', waited=true, head_sha, and evidence fields; Team Lead decides whether to accept. Include extra key pr_checks and copy it from the publisher answer.",
+            "Publisher action must be PASS only when the assigned delivery work is complete with structured evidence. For repository publishing: a PR was created/found, pushed branch/head SHA identified, and PR checks/statuses were handled with gh. If checks exist, they must pass. If no checks are configured/found, include pr_checks.overall_status='no_checks_configured' or 'no_checks_found', waited=true, head_sha, and evidence fields; Team Lead decides whether to accept. For external publication: include publication.published=true and artifact_url/url or artifact_id/comment_id/node_id. Include extra keys pr_checks and/or publication and copy them from the publisher answer.",
         )
     if role == "coder":
         return _summary_schema_contract(
             role,
-            "Use PASS only if implementation is ready for the next selected gate with relevant self-validation evidence or a concrete statement that no meaningful validation exists. Include files_changed, install commands, validation gaps, remaining known issues, docs_lookup_used, and docs_sources when implementation depended on external/current APIs, specs, CI syntax, config formats, CLI flags, or package/framework behavior.",
+            "Use PASS only if implementation is ready for the next selected gate with relevant self-validation evidence or a concrete statement that no meaningful validation exists. Include files_changed, install commands, validation gaps, remaining known issues, documentation with impact_assessed, required, updated, files, reason, waiver_reason, docs_lookup_used, and docs_sources when implementation depended on external/current APIs, specs, CI syntax, config formats, CLI flags, or package/framework behavior.",
         )
     if role == "senior_staff_engineer":
         return _summary_schema_contract(
@@ -985,7 +1003,7 @@ def build_role_summary_instructions(role: str) -> str:
     if role == "architect":
         return _summary_schema_contract(
             role,
-            "Use PASS if the implementation plan is ready for coder. Include key files, acceptance criteria, validation plan, minimal required role evidence, and docs_sources_used when relevant. Do not claim tests/builds were executed.",
+            "Use PASS if the implementation plan is ready for coder. Include key files, acceptance criteria, validation plan, documentation impact/targets/waiver, minimal required role evidence, and docs_sources_used when relevant. Do not claim tests/builds were executed.",
         )
     if role == "research":
         return _summary_schema_contract(

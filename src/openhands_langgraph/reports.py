@@ -106,6 +106,7 @@ class PublisherReport(RoleReportBase):
     published_change_set_id: str | None = None
     publish: JsonDict = Field(default_factory=dict)
     pr_checks: JsonDict = Field(default_factory=dict)
+    publication: JsonDict = Field(default_factory=dict)
     pr_feedback: JsonDict = Field(default_factory=dict)
     publisher_recommendation: JsonDict = Field(default_factory=dict)
 
@@ -292,6 +293,8 @@ def compact_report_summary(report: JsonDict) -> JsonDict:
         base["publish"] = report.get("publish")
         if report.get("pr_checks"):
             base["pr_checks"] = report.get("pr_checks")
+        if report.get("publication"):
+            base["publication"] = report.get("publication")
         if report.get("pr_feedback"):
             base["pr_feedback"] = report.get("pr_feedback")
         if report.get("publisher_recommendation"):

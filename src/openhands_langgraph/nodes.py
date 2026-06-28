@@ -29,6 +29,15 @@ from .prompts import (
 from .reports import parse_role_report, report_required_target_gaps
 from .state import JsonDict, OpenHandsGraphState
 from .team_lead import DirectLLMTeamLeadRunner, TeamLeadDecision, TeamLeadDecisionResult
+from .role_policy import validate_team_lead_assignment_policy
+from .work_order_policy import (
+    is_external_publication_order,
+    is_repository_work_order,
+    validate_work_order_role_selection,
+    work_order_forbids_role,
+    work_order_strategy,
+    work_order_surface,
+)
 
 
 class OpenHandsLangGraphError(RuntimeError):
@@ -550,7 +559,7 @@ def _postprocess_role_result(role: str, result_dict: JsonDict) -> JsonDict:
         result_dict["report_id"] = report.get("report_id") or str(fallback_report_id)
         if isinstance(report.get("validation_profile"), dict) and report.get("validation_profile"):
             summary.setdefault("validation_profile", report.get("validation_profile"))
-        for key in ("validation", "validation_review", "pr_checks", "publish", "files_changed", "routing_hints"):
+        for key in ("validation", "validation_review", "pr_checks", "publish", "publication", "files_changed", "routing_hints"):
             if key in report and report.get(key) not in (None, [], {}):
                 summary.setdefault(key, report.get(key))
     else:
@@ -565,10 +574,15 @@ def _postprocess_role_result(role: str, result_dict: JsonDict) -> JsonDict:
         validation_review = _extract_answer_object(result_dict, "validation_review")
         if validation_review:
             summary["validation_review"] = validation_review
-    elif role == "publisher" and not isinstance(summary.get("pr_checks"), dict):
-        pr_checks = _extract_answer_object(result_dict, "pr_checks")
-        if pr_checks:
-            summary["pr_checks"] = pr_checks
+    elif role == "publisher":
+        if not isinstance(summary.get("pr_checks"), dict):
+            pr_checks = _extract_answer_object(result_dict, "pr_checks")
+            if pr_checks:
+                summary["pr_checks"] = pr_checks
+        if not isinstance(summary.get("publication"), dict):
+            publication = _extract_answer_object(result_dict, "publication")
+            if publication:
+                summary["publication"] = publication
 
     result_dict["summary"] = summary
     if role == "qa" and isinstance(summary.get("validation"), dict):
@@ -1225,6 +1239,226 @@ def _publisher_publish(result: JsonDict | None) -> JsonDict:
     return {}
 
 
+
+
+def _publisher_publication(result: JsonDict | None) -> JsonDict:
+    if not isinstance(result, dict):
+        return {}
+    summary = _summary_dict(result)
+    for candidate in (
+        summary.get("publication"),
+        (result.get("role_report") or {}).get("publication") if isinstance(result.get("role_report"), dict) else None,
+        _extract_answer_object(result, "publication"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    publish = _publisher_publish(result)
+    if isinstance(publish, dict):
+        kind = str(publish.get("target_type") or publish.get("kind") or publish.get("type") or "").lower()
+        if kind and any(token in kind for token in ("comment", "discussion", "issue", "release")):
+            return publish
+    return {}
+
+
+def _publisher_publication_ok(result: JsonDict | None) -> tuple[bool, str | None]:
+    if not _role_action_pass(result):
+        return False, "Publisher did not return a usable PASS result"
+    publication = _publisher_publication(result)
+    if not publication:
+        return False, "Publisher PASS lacks structured publication evidence"
+
+    published = publication.get("published")
+    if published is None:
+        published = publication.get("created") or publication.get("updated") or publication.get("posted")
+    if not _truthy(published):
+        return False, "publication.published/created/updated must be true"
+
+    evidence_values = [
+        publication.get("artifact_url"),
+        publication.get("url"),
+        publication.get("html_url"),
+        publication.get("comment_url"),
+        publication.get("discussion_url"),
+        publication.get("artifact_id"),
+        publication.get("comment_id"),
+        publication.get("node_id"),
+        publication.get("id"),
+    ]
+    if not any(str(value or "").strip() for value in evidence_values):
+        return False, "Publication evidence requires artifact_url/url or artifact_id/comment_id/node_id"
+    return True, None
+
+
+def _documentation_from_result(result: JsonDict | None) -> JsonDict:
+    if not isinstance(result, dict):
+        return {}
+    summary = _summary_dict(result)
+    for candidate in (
+        summary.get("documentation"),
+        (result.get("role_report") or {}).get("documentation") if isinstance(result.get("role_report"), dict) else None,
+        _extract_answer_object(result, "documentation"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _latest_documentation_evidence_result(state: OpenHandsGraphState) -> tuple[str | None, JsonDict | None]:
+    """Return the strongest documentation evidence after the latest Coder PASS.
+
+    Reviewer/QA evidence is preferred because it means documentation consistency
+    was independently checked. If those roles were explicitly skipped, Coder
+    self-evidence can still satisfy the structural gate.
+    """
+
+    coder_idx = _latest_coder_pass_index(state)
+    for role in ("reviewer", "qa"):
+        result = _latest_pass_result_for_role_after_index(state, role, coder_idx)
+        if result and _documentation_from_result(result):
+            return role, result
+    coder = _latest_coder_pass_result(state)
+    if coder and _documentation_from_result(coder):
+        return "coder", coder
+    return None, None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "yes", "y", "1", "required", "needed"}:
+        return True
+    if text in {"false", "no", "n", "0", "not_required", "not-required", "not required", "none", "n/a", "na"}:
+        return False
+    return None
+
+
+def _documentation_evidence_ok(evidence: JsonDict, policy: JsonDict | None = None) -> tuple[bool, str | None]:
+    policy = policy or {}
+    if not isinstance(evidence, dict) or not evidence:
+        return False, "Missing structured documentation evidence"
+    if not _truthy(evidence.get("impact_assessed")):
+        return False, "documentation.impact_assessed must be true"
+
+    required = _bool_or_none(evidence.get("required"))
+    if required is None:
+        required = _bool_or_none(policy.get("documentation_required"))
+    if required is None:
+        return False, "documentation.required must be true or false"
+
+    if required:
+        updated = evidence.get("updated")
+        if updated is None:
+            updated = policy.get("documentation_updated")
+        if not _truthy(updated):
+            return False, "documentation.required=true requires documentation.updated=true"
+        files = evidence.get("files") or evidence.get("updated_files") or []
+        if isinstance(files, str):
+            files = [item.strip() for item in files.replace(";", ",").split(",") if item.strip()]
+        if not _nonempty_list(files):
+            return False, "documentation.required=true requires at least one documentation file"
+        return True, None
+
+    waiver = evidence.get("waiver_reason") or evidence.get("reason") or policy.get("documentation_waiver_reason")
+    if not _non_empty_string(waiver):
+        return False, "documentation.required=false requires a concrete waiver_reason"
+    return True, None
+
+
+def _repository_documentation_gate_ok(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    """Repository work cannot be published/completed without docs impact evidence.
+
+    This gate intentionally does not apply to external publication/direct API
+    work orders. For repository changes, documentation is either updated or
+    explicitly waived with a concrete reason.
+    """
+
+    surface = _work_order_surface(decision)
+    strategy = _work_order_strategy(decision)
+    if surface != "repository" and strategy != "repo_change":
+        return True, None
+    if not _latest_coder_pass_result(state):
+        return True, None
+
+    policy = _decision_policy(decision)
+    if not _truthy(policy.get("documentation_impact_assessed")):
+        return False, "Repository publishing/completion requires policy_evaluation.documentation_impact_assessed=true"
+    if not (
+        _truthy(policy.get("documentation_updated_or_waived"))
+        or _truthy(policy.get("documentation_evidence_accepted"))
+    ):
+        return False, "Repository publishing/completion requires documentation_updated_or_waived=true or documentation_evidence_accepted=true"
+
+    source_role, result = _latest_documentation_evidence_result(state)
+    evidence = _documentation_from_result(result)
+    ok, reason = _documentation_evidence_ok(evidence, policy)
+    if not ok:
+        return False, reason
+
+    reviewer = _reviewer_pass_after_validation_gate(state)
+    qa = _qa_pass_after_latest_coder(state)
+    if reviewer and source_role != "reviewer":
+        return False, "Reviewer PASS must include structured documentation evidence"
+    if not reviewer and qa and source_role != "qa":
+        return False, "QA PASS must include structured documentation evidence when Reviewer is skipped"
+    return True, None
+
+
+def _work_order_dict(decision: TeamLeadDecision) -> JsonDict:
+    from .work_order_policy import decision_work_order
+
+    return decision_work_order(decision)
+
+
+def _work_order_surface(decision: TeamLeadDecision) -> str:
+    return work_order_surface(decision)
+
+
+def _work_order_strategy(decision: TeamLeadDecision) -> str:
+    return work_order_strategy(decision)
+
+
+def _work_order_forbids_role(decision: TeamLeadDecision, role: str) -> bool:
+    return work_order_forbids_role(decision, role)
+
+
+def _has_discovery_evidence(state: OpenHandsGraphState) -> bool:
+    return bool(_latest_pass_result_for_role(state, "scout") or _latest_pass_result_for_role(state, "research"))
+
+
+def _external_publication_publisher_gate(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    policy = _decision_policy(decision)
+    if not _truthy(policy.get("can_publish")):
+        return False, "External publication Publisher requires policy_evaluation.can_publish=true"
+    if not (_truthy(policy.get("publication_target_verified")) or _truthy(policy.get("target_verified"))):
+        return False, "External publication Publisher requires publication_target_verified=true or target_verified=true"
+    if not (_truthy(policy.get("publication_content_reviewed")) or _truthy(policy.get("content_prepared"))):
+        return False, "External publication Publisher requires publication_content_reviewed=true or content_prepared=true"
+    if not _truthy(policy.get("no_repo_changes_accepted")):
+        return False, "External publication Publisher requires no_repo_changes_accepted=true"
+    if not _has_discovery_evidence(state):
+        if _truthy(policy.get("can_skip_discovery")) and _non_empty_string(policy.get("skip_discovery_reason")):
+            return True, None
+        return False, "External publication Publisher requires Scout/Research PASS or explicit discovery waiver"
+    return True, None
+
+
+def _external_publication_stop_gate(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    policy = _decision_policy(decision)
+    if not _truthy(policy.get("can_complete")):
+        return False, "STOP_COMPLETED requires policy_evaluation.can_complete=true"
+    if not _truthy(policy.get("publisher_publication_evidence_accepted")):
+        return False, "External publication STOP_COMPLETED requires publisher_publication_evidence_accepted=true"
+    publisher = _latest_pass_result_for_role(state, "publisher")
+    ok, reason = _publisher_publication_ok(publisher)
+    if not ok:
+        return False, reason
+    return True, None
+
 def _publisher_pr_checks_ok(result: JsonDict | None) -> tuple[bool, str | None, bool]:
     if not _role_action_pass(result):
         return False, "Publisher did not return a usable PASS result", False
@@ -1323,30 +1557,15 @@ def _line_has_forbidden_publishing_instruction(line: str) -> bool:
 
 
 def _assignment_scope_ok(decision: TeamLeadDecision) -> tuple[bool, str | None]:
-    next_role = str(decision.next_role or "").strip().lower()
-    if not next_role or next_role not in _NON_PUBLISHER_ROLES:
-        return True, None
+    """Validate assignment by typed capabilities instead of prose keywords.
 
-    # Do not trust the Team Lead's self-reported assignment_scope_check as a
-    # structural rejection signal. Small/local models can easily set
-    # publishing_actions_in_non_publisher_assignment=true because publishing is
-    # mentioned in future_workflow_plan, even when the current role instructions
-    # are safe. The validator is the authority: reject only actual forbidden
-    # publishing instructions assigned to the current non-Publisher role.
-    instructions = str(getattr(decision, "instructions", "") or "")
-    bad_lines = [
-        line.strip()
-        for line in re.split(r"[\n;]+", instructions)
-        if _line_has_forbidden_publishing_instruction(line)
-    ]
-    if bad_lines:
-        return (
-            False,
-            f"Invalid Team Lead decision: next_role={next_role} instructions contain non-{next_role} publishing work: "
-            + "; ".join(bad_lines[:3])
-            + ". Keep instructions limited to current-role work and put future publishing steps in future_workflow_plan.",
-        )
-    return True, None
+    Free-form instructions are guidance for the selected role. Permissions are
+    expressed through role_catalog capabilities and work_order policy, so terms
+    such as push, commit, PR, release, or build can safely appear as factual
+    objects in discovery/review instructions.
+    """
+
+    return validate_team_lead_assignment_policy(decision)
 
 
 def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
@@ -1359,9 +1578,15 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return False, ids_error
 
     if action == "STOP_COMPLETED":
+        if is_external_publication_order(decision):
+            return _external_publication_stop_gate(state, decision)
+
         policy = _decision_policy(decision)
         if not _truthy(policy.get("can_complete")):
             return False, "STOP_COMPLETED requires policy_evaluation.can_complete=true"
+        docs_ok, docs_error = _repository_documentation_gate_ok(state, decision)
+        if not docs_ok:
+            return False, docs_error
         if not _truthy(policy.get("publisher_pr_checks_accepted")):
             return False, "STOP_COMPLETED requires publisher_pr_checks_accepted=true"
         publisher = _latest_pass_result_for_role(state, "publisher")
@@ -1387,6 +1612,13 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return False, retry_error
 
     next_role = decision.next_role
+    surface = _work_order_surface(decision)
+    strategy = _work_order_strategy(decision)
+
+    role_policy_ok, role_policy_error = validate_work_order_role_selection(decision, next_role)
+    if not role_policy_ok:
+        return False, role_policy_error
+
     if next_role == "scout":
         return _enforce_scout_facts_only_decision(decision)
 
@@ -1409,6 +1641,8 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return _qa_skip_ok(state, decision)
 
     if next_role == "publisher":
+        if is_external_publication_order(decision):
+            return _external_publication_publisher_gate(state, decision)
         if not _latest_coder_pass_result(state):
             return False, "Publisher cannot run before a usable Coder PASS"
         qa_ok, qa_error = _qa_skip_ok(state, decision)
@@ -1419,32 +1653,26 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
             return False, reviewer_error
         if not _truthy(_decision_policy(decision).get("can_publish")):
             return False, "Publisher requires policy_evaluation.can_publish=true"
+        docs_ok, docs_error = _repository_documentation_gate_ok(state, decision)
+        if not docs_ok:
+            return False, docs_error
         return True, None
 
     return True, None
 
 
 def _enforce_scout_facts_only_decision(decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    """Scout safety is capability-based; prompt still asks for facts only.
+
+    The old implementation rejected assignments by keywords such as "root cause"
+    or "build", which created false positives for factual CI/GitHub Actions
+    discovery. The role catalog now constrains Scout to read-only capabilities;
+    if Team Lead asks for write/test/build capabilities, validation rejects it.
+    """
+
     if decision.next_role != "scout":
         return True, None
-    text = f"{decision.instructions or ''}\n{decision.reason or ''}".lower()
-    forbidden = [
-        "root cause",
-        "root-cause",
-        "hypothesis",
-        "hypothesize",
-        "solution",
-        "fix plan",
-        "implement",
-        "patch",
-        "run tests",
-        "build",
-    ]
-    if any(marker in text for marker in forbidden):
-        return False, SCOUT_FACTS_ONLY_INSTRUCTIONS
-    if "fact" not in text and "context" not in text:
-        return False, SCOUT_FACTS_ONLY_INSTRUCTIONS
-    return True, None
+    return validate_team_lead_assignment_policy(decision)
 
 
 async def _build_team_lead_runner(state: OpenHandsGraphState, config: Optional[RunnableConfig]) -> DirectLLMTeamLeadRunner:

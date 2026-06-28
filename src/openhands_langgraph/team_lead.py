@@ -4,7 +4,10 @@ import json
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+
+from .role_catalog import TEAM_LEAD_ALLOWED_ROLES
+from .work_order_policy import EXECUTION_STRATEGIES, WORK_ORDER_SURFACES, normalize_strategy, normalize_surface
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 JsonDict = dict[str, Any]
 
@@ -15,17 +18,88 @@ _ALLOWED_ACTIONS = {
     "STOP_BLOCKED",
     "ASK_HUMAN",
 }
-_ALLOWED_ROLES = {
-    "scout",
-    "research",
-    "senior_staff_engineer",
-    "architect",
-    "coder",
-    "qa",
-    "reviewer",
-    "publisher",
-}
+_ALLOWED_ROLES = set(TEAM_LEAD_ALLOWED_ROLES)
 
+
+def _coerce_string_list(value: Any) -> list[str]:
+    """Accept common LLM list mistakes while keeping the public contract typed.
+
+    Local models often return comma-separated strings for fields that are
+    explicitly documented as arrays. Treat those as recoverable formatting
+    issues so the Team Lead can be normalized and structurally validated instead
+    of failing before policy checks run.
+    """
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return _coerce_string_list(parsed)
+        normalized = text.replace("\n", ",").replace(";", ",")
+        return [item.strip().strip("\"'") for item in normalized.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, str) and ("," in item or "\n" in item or ";" in item):
+                items.extend(_coerce_string_list(item))
+            elif item is not None:
+                items.append(str(item).strip())
+        return [item for item in items if item]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _normalize_team_lead_decision_payload(value: Any) -> Any:
+    """Normalize common local-LLM JSON shape mistakes before Pydantic validation.
+
+    This is intentionally done before model construction, not only through field
+    validators, so direct runner errors report policy issues rather than raw type
+    mismatches when a model returns comma-separated strings for array fields.
+    """
+
+    if not isinstance(value, dict):
+        return value
+
+    data: JsonDict = dict(value)
+    for key in (
+        "blocking_summary",
+        "capabilities_required",
+        "context_sources",
+        "future_workflow_plan",
+    ):
+        if key in data:
+            data[key] = _coerce_string_list(data.get(key))
+
+    work_order = data.get("work_order")
+    if isinstance(work_order, dict):
+        work_order_data: JsonDict = dict(work_order)
+        for key in (
+            "required_evidence",
+            "completed_evidence",
+            "forbidden_roles",
+            "preferred_roles",
+            "documentation_targets",
+        ):
+            if key in work_order_data:
+                work_order_data[key] = _coerce_string_list(work_order_data.get(key))
+        data["work_order"] = work_order_data
+
+    policy = data.get("policy_evaluation")
+    if isinstance(policy, dict):
+        policy_data: JsonDict = dict(policy)
+        for key in ("blocking_reasons", "accepted_risks"):
+            if key in policy_data:
+                policy_data[key] = _coerce_string_list(policy_data.get(key))
+        data["policy_evaluation"] = policy_data
+
+    return data
 
 class TeamLeadPolicyEvaluation(BaseModel):
     """Structured rationale for Team Lead routing decisions.
@@ -44,6 +118,21 @@ class TeamLeadPolicyEvaluation(BaseModel):
     qa_evidence_accepted: bool | None = None
     reviewer_evidence_accepted: bool | None = None
     publisher_pr_checks_accepted: bool | None = None
+    publisher_publication_evidence_accepted: bool | None = None
+    external_publication_accepted: bool | None = None
+    publication_target_verified: bool | None = None
+    publication_content_reviewed: bool | None = None
+    no_repo_changes_accepted: bool | None = None
+    documentation_impact_assessed: bool | None = None
+    documentation_updated_or_waived: bool | None = None
+    documentation_required: bool | None = None
+    documentation_updated: bool | None = None
+    documentation_evidence_accepted: bool | None = None
+    documentation_waiver_reason: str | None = None
+    target_verified: bool | None = None
+    content_prepared: bool | None = None
+    can_skip_discovery: bool | None = None
+    skip_discovery_reason: str | None = None
     validation_profile_accepted: bool | None = None
     pr_feedback_accepted: bool | None = None
     corrective_loop_required: bool | None = None
@@ -68,6 +157,11 @@ class TeamLeadPolicyEvaluation(BaseModel):
     implementation_scope_accepted: bool | None = None
     blocking_reasons: list[str] = Field(default_factory=list)
     accepted_risks: list[str] = Field(default_factory=list)
+
+    @field_validator("blocking_reasons", "accepted_risks", mode="before")
+    @classmethod
+    def _coerce_policy_lists(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
 
 
 class TeamLeadAcceptedReportIds(BaseModel):
@@ -100,6 +194,63 @@ class TeamLeadAssignmentScopeCheck(BaseModel):
     notes: str | None = None
 
 
+class TeamLeadWorkOrder(BaseModel):
+    """Task classification used by the policy-driven Team Lead router.
+
+    Work orders decouple the workflow from a fixed development chain. Existing
+    specialist roles are selected by capability and required evidence instead
+    of by ceremony. Unknown/extra fields are allowed so future roles and policy
+    surfaces can be introduced without breaking older clients.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    intent: str | None = None
+    target_system: str | None = None
+    change_surface: str = "repository"
+    artifact_kind: str | None = None
+    execution_strategy: str = "repo_change"
+    risk_level: str | None = None
+    requires_human_approval: bool | None = None
+    requires_rollback_plan: bool | None = None
+    requires_validation: bool | None = None
+    required_evidence: list[str] = Field(default_factory=list)
+    completed_evidence: list[str] = Field(default_factory=list)
+    forbidden_roles: list[str] = Field(default_factory=list)
+    preferred_roles: list[str] = Field(default_factory=list)
+    documentation_required: bool | None = None
+    documentation_reason: str | None = None
+    documentation_targets: list[str] = Field(default_factory=list)
+
+    @field_validator("change_surface", mode="before")
+    @classmethod
+    def _normalize_surface(cls, value: Any) -> str:
+        return normalize_surface(value)
+
+    @field_validator("execution_strategy", mode="before")
+    @classmethod
+    def _normalize_strategy(cls, value: Any) -> str:
+        return normalize_strategy(value)
+
+    @field_validator("risk_level", mode="before")
+    @classmethod
+    def _normalize_work_order_risk(cls, value: Any) -> str | None:
+        text = str(value or "").strip().lower()
+        return text if text in {"low", "medium", "high", "critical"} else None
+
+    @field_validator(
+        "required_evidence",
+        "completed_evidence",
+        "forbidden_roles",
+        "preferred_roles",
+        "documentation_targets",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_work_order_lists(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
+
+
 class TeamLeadDecision(BaseModel):
     """Tool-less Team Lead routing decision."""
 
@@ -112,17 +263,10 @@ class TeamLeadDecision(BaseModel):
     risk_level: Literal["low", "medium", "high", "critical"] | None = None
     blocking: bool = False
     blocking_summary: list[str] = Field(default_factory=list)
-    next_role: Literal[
-        "scout",
-        "research",
-        "senior_staff_engineer",
-        "architect",
-        "coder",
-        "qa",
-        "reviewer",
-        "publisher",
-    ] | None = None
+    next_role: str | None = None
     role_instance: str | None = None
+    work_order: TeamLeadWorkOrder = Field(default_factory=TeamLeadWorkOrder)
+    capabilities_required: list[str] = Field(default_factory=list)
     context_sources: list[str] = Field(default_factory=list)
     instructions: str = ""
     future_workflow_plan: list[str] = Field(default_factory=list)
@@ -131,8 +275,24 @@ class TeamLeadDecision(BaseModel):
     accepted_report_ids: TeamLeadAcceptedReportIds = Field(default_factory=TeamLeadAcceptedReportIds)
     policy_evaluation: TeamLeadPolicyEvaluation = Field(default_factory=TeamLeadPolicyEvaluation)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_decision_payload(cls, value: Any) -> Any:
+        return _normalize_team_lead_decision_payload(value)
+
+    @field_validator(
+        "blocking_summary",
+        "capabilities_required",
+        "context_sources",
+        "future_workflow_plan",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decision_lists(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
+
     def normalized(self) -> "TeamLeadDecision":
-        data = self.model_dump(mode="python")
+        data = _normalize_team_lead_decision_payload(self.model_dump(mode="python"))
         data["action"] = str(data.get("action") or "").strip().upper().replace("-", "_").replace(" ", "_")
         if data["action"] not in _ALLOWED_ACTIONS:
             raise ValueError(f"unsupported Team Lead action: {data['action']}")
@@ -254,7 +414,7 @@ class DirectLLMTeamLeadRunner:
                     data = response.json()
                 text = _extract_chat_completion_text(data)
                 last_text = text
-                parsed = _parse_json_object(text)
+                parsed = _normalize_team_lead_decision_payload(_parse_json_object(text))
                 decision = TeamLeadDecision.model_validate(parsed).normalized()
                 return TeamLeadDecisionResult(
                     decision=decision,
