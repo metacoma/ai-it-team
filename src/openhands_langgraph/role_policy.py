@@ -6,15 +6,15 @@ from typing import Any
 JsonDict = dict[str, Any]
 
 # This module is intentionally a small compatibility layer over the existing
-# Team Lead validator in nodes.py.  It removes prose/text gates from routing
-# validation and keeps typed capability checks as the only assignment policy.
+# Team Lead validator in nodes.py. It removes prose/text gates from routing
+# validation and adds a typed direct-publisher path for release/tag-only work.
 #
 # The rest of the deterministic workflow gates in nodes.py remain intact:
 # accepted report IDs, retry-after-runtime-failure, research/architect/QA/
-# reviewer/publisher evidence gates, etc.  Those gates validate workflow state
-# and evidence, not natural-language wording.
+# reviewer/publisher evidence gates, PR check validation, etc. Those gates
+# validate workflow state and evidence, not natural-language wording.
 
-ROLE_POLICY_HOOK_VERSION = 2
+ROLE_POLICY_HOOK_VERSION = 3
 
 ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
     "scout": frozenset(
@@ -91,6 +91,11 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "commit",
             "push",
             "create_pr",
+            "create_tag",
+            "create_release",
+            "update_release_description",
+            "inspect_release_artifacts",
+            "monitor_workflow",
             "inspect_pr_checks",
             "classify_pr_check_failures",
             "summarize_publish_result",
@@ -114,7 +119,12 @@ Additional Team Lead assignment contract:
 - Do not rely on wording in instructions to express permissions or restrictions.
 - Natural-language instructions are not structurally rejected for mentioning repository concepts such as push events, commits, PRs, releases, fixes, build files, implementation history, or issue resolution.
 - Put future-role work in future_workflow_plan, but the deterministic validator will not reject current instructions by keyword.
+- Publisher normally follows implementation evidence from Coder/QA/Reviewer.
+- For tag-only/release-only/publish-only tasks where Scout confirms that no code changes are required, Team Lead may route directly to Publisher after Scout PASS.
+- Direct Publisher routing without Coder PASS requires structured policy_evaluation acceptance: can_publish=true, can_skip_qa=true, can_skip_reviewer=true, qa_evidence_accepted=true, and reviewer_evidence_accepted=true.
 """.strip()
+
+PUBLISHER_DIRECT_CODER_GATE_REASON = "Publisher cannot run before a usable Coder PASS"
 
 
 def capabilities_for_role(role: str | None) -> frozenset[str]:
@@ -159,7 +169,15 @@ def _decision_mapping(decision: Any) -> JsonDict:
             pass
 
     data: JsonDict = {}
-    for key in ("action", "next_role", "capabilities_required", "assignment"):
+    for key in (
+        "action",
+        "next_role",
+        "capabilities_required",
+        "assignment",
+        "policy_evaluation",
+        "accepted_report_ids",
+        "workflow_mode",
+    ):
         if hasattr(decision, key):
             data[key] = getattr(decision, key)
 
@@ -168,6 +186,23 @@ def _decision_mapping(decision: Any) -> JsonDict:
         data.update(extra)
 
     return data
+
+
+def _decision_policy(decision: Any) -> JsonDict:
+    data = _decision_mapping(decision)
+    policy = data.get("policy_evaluation")
+    return dict(policy) if isinstance(policy, Mapping) else {}
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "on", "pass", "accepted"}
 
 
 def decision_required_capabilities(decision: Any) -> list[str]:
@@ -235,9 +270,9 @@ def _assignment_scope_without_prose_gate(decision: Any) -> tuple[bool, str | Non
     """Replacement for nodes._assignment_scope_ok.
 
     The old implementation scanned free-form instructions for words like
-    "push", "commit", "pull request", and "GITHUB_TOKEN".  That caused false
+    "push", "commit", "pull request", and "GITHUB_TOKEN". That caused false
     positives for legitimate research/scout tasks such as GitHub Actions
-    ``on: push`` events or PR changelog generation.  Assignment policy should
+    ``on: push`` events or PR changelog generation. Assignment policy should
     be typed-capability based, so this function intentionally ignores prose.
     """
     return validate_team_lead_assignment_policy(decision)
@@ -247,11 +282,100 @@ def _scout_assignment_without_prose_gate(decision: Any) -> tuple[bool, str | Non
     """Replacement for nodes._enforce_scout_facts_only_decision.
 
     Scout can mention issue resolution, commits, PRs, fixes, build files, or
-    implementation history when the assignment is factual discovery.  It should
+    implementation history when the assignment is factual discovery. It should
     not be rejected by keyword; if explicit typed capabilities are provided,
     they are checked against Scout's capability set.
     """
     return validate_team_lead_assignment_policy(decision)
+
+
+def _latest_pass_result_for_role(nodes_module: Any, state: JsonDict, role: str) -> JsonDict | None:
+    helper = getattr(nodes_module, "_latest_pass_result_for_role", None)
+    if callable(helper):
+        result = helper(state, role)
+        return result if isinstance(result, dict) and result else None
+
+    for result in reversed(list(state.get("role_results") or [])):
+        if not isinstance(result, dict):
+            continue
+        if str(result.get("role") or "").strip().lower() != role:
+            continue
+        if result.get("ok") is True and str(result.get("summary_action") or "").upper() == "PASS":
+            return result
+    direct = state.get(f"{role}_result")
+    if isinstance(direct, dict) and direct.get("ok") is True:
+        return direct
+    return None
+
+
+def _direct_publisher_without_coder_ok(
+    nodes_module: Any,
+    state: JsonDict,
+    decision: Any,
+) -> tuple[bool, str | None]:
+    """Allow Publisher without Coder only for structurally accepted publish-only flow.
+
+    This is intentionally not a prose scanner. It does not search for phrases
+    like "no code changes". It relies on the Team Lead's structured policy
+    fields plus a usable Scout PASS, and it only runs after the original
+    validator already accepted earlier gates such as accepted_report_ids,
+    retry requirements, research waiver, and assignment scope.
+    """
+    data = _decision_mapping(decision)
+    next_role = str(data.get("next_role") or getattr(decision, "next_role", "")).strip().lower()
+    if next_role != "publisher":
+        return False, None
+
+    if not _latest_pass_result_for_role(nodes_module, state, "scout"):
+        return False, "Direct Publisher without Coder PASS requires a usable Scout PASS"
+
+    policy = _decision_policy(decision)
+    required_policy_flags = (
+        "can_publish",
+        "can_skip_qa",
+        "can_skip_reviewer",
+        "qa_evidence_accepted",
+        "reviewer_evidence_accepted",
+    )
+    missing = [flag for flag in required_policy_flags if not _truthy(policy.get(flag))]
+    if missing:
+        return (
+            False,
+            "Direct Publisher without Coder PASS requires policy_evaluation flags: "
+            + ", ".join(required_policy_flags)
+            + f"; missing/false: {', '.join(missing)}",
+        )
+
+    return True, None
+
+
+def _wrap_team_lead_validator(original: Any) -> Any:
+    if getattr(original, "_role_policy_wrapped", False):
+        return original
+
+    def _wrapped(state: JsonDict, decision: Any) -> tuple[bool, str | None]:
+        ok, reason = original(state, decision)
+        if ok:
+            return ok, reason
+
+        if reason == PUBLISHER_DIRECT_CODER_GATE_REASON:
+            from . import nodes as nodes_module
+
+            direct_ok, direct_error = _direct_publisher_without_coder_ok(
+                nodes_module,
+                state,
+                decision,
+            )
+            if direct_ok:
+                return True, None
+            if direct_error:
+                return False, direct_error
+
+        return ok, reason
+
+    _wrapped._role_policy_wrapped = True  # type: ignore[attr-defined]
+    _wrapped._role_policy_original = original  # type: ignore[attr-defined]
+    return _wrapped
 
 
 def _wrap_role_prompt_builder(original: Any) -> Any:
@@ -295,8 +419,8 @@ def _wrap_team_lead_decision_prompt_builder(original: Any) -> Any:
 def install_runtime_policy_hooks() -> None:
     """Install role-policy hooks and disable prose-based Team Lead gates.
 
-    This function is idempotent, but it also upgrades installations that had the
-    earlier v1 hook where only the Scout prose scanner was replaced.
+    This function is idempotent, but it also upgrades installations that had
+    earlier v1/v2 hooks where only prose scanners were replaced.
     """
     from . import nodes, prompts
 
@@ -308,6 +432,10 @@ def install_runtime_policy_hooks() -> None:
     # Keep all evidence/state-based gates implemented in nodes.py.
     nodes._assignment_scope_ok = _assignment_scope_without_prose_gate
     nodes._enforce_scout_facts_only_decision = _scout_assignment_without_prose_gate
+
+    original_validator = getattr(nodes, "_validate_team_lead_decision", None)
+    if callable(original_validator):
+        nodes._validate_team_lead_decision = _wrap_team_lead_validator(original_validator)
 
     original_nodes_role_prompt = getattr(nodes, "build_role_prompt", None)
     if callable(original_nodes_role_prompt):
