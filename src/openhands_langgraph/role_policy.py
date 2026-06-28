@@ -10,6 +10,8 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
         {
             "read_repo",
             "inspect_files",
+            "inspect_git_history",
+            "inspect_issue_metadata",
             "inspect_ci_metadata",
             "inspect_runtime_metadata",
             "summarize_facts",
@@ -85,187 +87,127 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
 }
 
 ROLE_POLICY_CONTRACT = """Role policy contract:
-- Team Lead assignments are advisory routing context; they cannot expand this role's permissions.
-- If Team Lead instructions conflict with the current role contract, obey the current role contract and report the conflict.
-- Safety is enforced by role contracts and deterministic graph state checks, not by natural-language forbidden-word matching.
+- Team Lead assignments are routing context; they cannot expand a role's permissions.
+- Deterministic validation checks typed capabilities only, not natural-language words.
+- Free-form instructions are human-readable guidance, not a policy source of truth.
+- If instructions and typed capabilities conflict, the role contract wins and the role must report the conflict.
 """.strip()
 
-PUBLISHER_PR_CHECK_CONTRACT = """Publisher PR-check contract:
-- If PR checks exist and pass, report pr_checks.overall_status="passed".
-- If no checks are configured/found, report pr_checks.overall_status="no_checks_configured" or "no_checks_found", waited=true, head_sha, and evidence.
-- If PR checks fail, classify the failure using typed evidence instead of prose-only claims.
-- A failed-check Publisher PASS is allowed only when the PR was created/pushed and pr_checks.failure_analysis proves the failure is unrelated to this PR change.
-- For unrelated pre-existing failures, set:
-  pr_checks.overall_status="failed"
-  pr_checks.failure_analysis.classification="pre_existing_codebase" or "unrelated_existing_failure"
-  pr_checks.failure_analysis.change_related=false
-  pr_checks.failure_analysis.evidence=[short concrete evidence strings]
-  pr_checks.failure_analysis.failing_tests=[test/job names when known]
-  pr_checks.failure_analysis.requires_coder_fix=false
-- If failure attribution is unclear or related to this PR change, return NEED_FIX or BLOCKER, not PASS.
+TEAM_LEAD_ASSIGNMENT_CONTRACT = """Additional Team Lead assignment contract:
+- For RUN_ROLE decisions, include an optional capabilities_required list.
+- capabilities_required must contain only capabilities allowed for next_role.
+- Do not rely on wording in instructions to express permissions or restrictions.
+- Scout factual work can mention issue resolution, commits, PRs, fixes, implementation history, or build files when the task is to inspect facts; this is not an instruction to modify code or run validation.
 """.strip()
-
-TEAM_LEAD_PR_CHECK_ACCEPTANCE_CONTRACT = """Additional Team Lead PR-check completion policy:
-- Publisher PASS can complete the workflow when the PR was created/pushed and PR checks either passed, are absent with structured no-checks evidence, or failed with structured unrelated-failure evidence.
-- For failed checks, accept completion only when Publisher reported pr_checks.failure_analysis.change_related=false and classification is pre_existing_codebase or unrelated_existing_failure with concrete evidence.
-- In that case set policy_evaluation.publisher_pr_checks_accepted=true, policy_evaluation.can_complete=true, accepted_report_ids.publisher, and include the residual CI failure in accepted_risks.
-- If Publisher check failure attribution is missing, unclear, or related to the PR change, run the appropriate fixing role or stop blocked instead of completing.
-""".strip()
-
-_ACCEPTED_UNRELATED_CHECK_CLASSIFICATIONS = {
-    "pre_existing_codebase",
-    "unrelated_existing_failure",
-    "not_caused_by_pr",
-    "not_related_to_pr_change",
-}
 
 
 def capabilities_for_role(role: str | None) -> frozenset[str]:
     return ROLE_CAPABILITIES.get(str(role or "").strip().lower(), frozenset())
 
 
+def _as_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        item = value.strip()
+        return [item] if item else []
+    if isinstance(value, Mapping):
+        return []
+    if isinstance(value, Iterable):
+        result: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                result.append(text)
+        return result
+    return []
+
+
+def _mapping_get_any(data: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
+def _decision_mapping(decision: Any) -> JsonDict:
+    if isinstance(decision, dict):
+        return dict(decision)
+    if hasattr(decision, "model_dump"):
+        try:
+            data = decision.model_dump(mode="python")
+            if isinstance(data, dict):
+                return dict(data)
+        except Exception:
+            pass
+    data: JsonDict = {}
+    for key in ("action", "next_role", "capabilities_required", "assignment"):
+        if hasattr(decision, key):
+            data[key] = getattr(decision, key)
+    extra = getattr(decision, "model_extra", None)
+    if isinstance(extra, dict):
+        data.update(extra)
+    return data
+
+
+def decision_required_capabilities(decision: Any) -> list[str]:
+    data = _decision_mapping(decision)
+    required = _as_string_list(
+        _mapping_get_any(
+            data,
+            "capabilities_required",
+            "required_capabilities",
+            "allowed_capabilities",
+        )
+    )
+    assignment = data.get("assignment")
+    if isinstance(assignment, Mapping):
+        required.extend(
+            _as_string_list(
+                _mapping_get_any(
+                    assignment,
+                    "capabilities_required",
+                    "required_capabilities",
+                    "allowed_capabilities",
+                    "allowed_operations",
+                    "operations",
+                )
+            )
+        )
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in required:
+        capability = item.strip()
+        if capability and capability not in seen:
+            seen.add(capability)
+            normalized.append(capability)
+    return normalized
+
+
 def validate_required_capabilities(
     role: str | None,
     required_capabilities: Iterable[str] | None,
 ) -> tuple[bool, str | None]:
-    """Validate typed capabilities without inspecting natural-language instructions."""
-
     required = {str(item).strip() for item in (required_capabilities or []) if str(item).strip()}
     if not required:
         return True, None
-
     allowed = capabilities_for_role(role)
-    unknown = sorted(required - allowed)
-    if unknown:
-        return False, f"{role or 'unknown'} cannot use capabilities: {', '.join(unknown)}"
+    forbidden = sorted(required - allowed)
+    if forbidden:
+        return False, f"{role or 'unknown'} cannot use capabilities: {', '.join(forbidden)}"
     return True, None
 
 
-def _decision_required_capabilities(decision: Any) -> list[str]:
-    value = getattr(decision, "capabilities_required", None)
-    if value is None and hasattr(decision, "model_extra"):
-        extra = getattr(decision, "model_extra") or {}
-        if isinstance(extra, dict):
-            value = extra.get("capabilities_required")
-    if value is None and hasattr(decision, "model_dump"):
-        data = decision.model_dump(mode="python")
-        if isinstance(data, dict):
-            value = data.get("capabilities_required")
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, Iterable):
-        return [str(item) for item in value]
-    return []
-
-
 def validate_team_lead_assignment_policy(decision: Any) -> tuple[bool, str | None]:
-    """Validate Team Lead assignment policy structurally, without prose scanning."""
-
-    role = getattr(decision, "next_role", None)
-    required = _decision_required_capabilities(decision)
-    return validate_required_capabilities(role, required)
+    data = _decision_mapping(decision)
+    role = data.get("next_role") or getattr(decision, "next_role", None)
+    return validate_required_capabilities(role, decision_required_capabilities(decision))
 
 
-def _summary_dict(result: JsonDict | None) -> JsonDict:
-    if not isinstance(result, dict):
-        return {}
-    summary = result.get("summary")
-    return summary if isinstance(summary, dict) else {}
+def _wrap_role_prompt_builder(original: Any) -> Any:
+    if getattr(original, "_role_policy_wrapped", False):
+        return original
 
-
-def _role_report_dict(result: JsonDict | None) -> JsonDict:
-    if not isinstance(result, dict):
-        return {}
-    report = result.get("role_report")
-    return report if isinstance(report, dict) else {}
-
-
-def _mapping_value(data: Any, path: tuple[str, ...]) -> Any:
-    current = data
-    for key in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return current
-
-
-def _first_mapping(*values: Any) -> JsonDict:
-    for value in values:
-        if isinstance(value, dict):
-            return value
-    return {}
-
-
-def _publisher_pr_checks(result: JsonDict | None) -> JsonDict:
-    summary = _summary_dict(result)
-    report = _role_report_dict(result)
-    return _first_mapping(
-        report.get("pr_checks"),
-        summary.get("pr_checks"),
-        _mapping_value(report, ("publish", "pr_checks")),
-        _mapping_value(summary, ("publish", "pr_checks")),
-    )
-
-
-def _bool_false(value: Any) -> bool:
-    if value is False:
-        return True
-    if isinstance(value, str):
-        return value.strip().lower() in {"false", "no", "0", "unrelated", "not_related"}
-    return False
-
-
-def publisher_has_structured_unrelated_check_failure(result: JsonDict | None) -> tuple[bool, str | None]:
-    """Return true for typed PR-check failures known to be unrelated to the PR.
-
-    This deliberately avoids substring matching over summaries. It accepts only
-    structured Publisher evidence in pr_checks.failure_analysis.
-    """
-
-    pr_checks = _publisher_pr_checks(result)
-    if not pr_checks:
-        return False, "Publisher result has no structured pr_checks object."
-
-    overall_status = str(pr_checks.get("overall_status") or pr_checks.get("status") or "").strip().lower()
-    if overall_status not in {"failed", "failure", "failing", "completed_failure"}:
-        return False, "Publisher pr_checks overall_status is not a failed-check state."
-
-    failure_analysis = pr_checks.get("failure_analysis")
-    if not isinstance(failure_analysis, dict):
-        return False, "Failed checks require pr_checks.failure_analysis."
-
-    classification = str(failure_analysis.get("classification") or "").strip().lower()
-    if classification not in _ACCEPTED_UNRELATED_CHECK_CLASSIFICATIONS:
-        return False, f"Unaccepted PR-check failure classification: {classification or 'missing'}."
-
-    if not _bool_false(failure_analysis.get("change_related")):
-        return False, "Failed PR checks are not explicitly marked change_related=false."
-
-    if failure_analysis.get("requires_coder_fix") is True:
-        return False, "Failed PR checks require a coder fix."
-
-    evidence = failure_analysis.get("evidence")
-    if not isinstance(evidence, list) or not evidence:
-        return False, "Failed PR checks require concrete failure_analysis.evidence."
-
-    return True, "PR checks failed, but Publisher supplied structured unrelated/pre-existing failure evidence."
-
-
-def _wrap_publisher_pr_checks_ok(original):
-    def _wrapped(publisher_result: JsonDict | None) -> tuple[bool, str | None, bool]:
-        ok, reason, no_checks = original(publisher_result)
-        if ok:
-            return ok, reason, no_checks
-
-        unrelated_ok, unrelated_reason = publisher_has_structured_unrelated_check_failure(publisher_result)
-        if unrelated_ok:
-            return True, unrelated_reason, False
-        return ok, reason or unrelated_reason, no_checks
-
-    return _wrapped
-
-
-def _wrap_role_prompt_builder(original):
     def _wrapped(role: str, state: JsonDict) -> str:
         prompt = original(role, state)
         additions: list[str] = []
@@ -275,81 +217,92 @@ def _wrap_role_prompt_builder(original):
                 ", ".join(allowed) if allowed else "not declared"
             )
             additions.extend([ROLE_POLICY_CONTRACT, capability_line])
-        if str(role or "").strip().lower() == "publisher" and PUBLISHER_PR_CHECK_CONTRACT not in prompt:
-            additions.append(PUBLISHER_PR_CHECK_CONTRACT)
         if not additions:
             return prompt
         return f"{prompt}\n\n" + "\n".join(additions) + "\n"
 
+    _wrapped._role_policy_wrapped = True  # type: ignore[attr-defined]
     return _wrapped
 
 
-def _wrap_team_lead_decision_prompt_builder(original):
+def _wrap_team_lead_decision_prompt_builder(original: Any) -> Any:
+    if getattr(original, "_role_policy_wrapped", False):
+        return original
+
     def _wrapped(state: JsonDict) -> str:
         prompt = original(state)
-        if TEAM_LEAD_PR_CHECK_ACCEPTANCE_CONTRACT in prompt:
+        if TEAM_LEAD_ASSIGNMENT_CONTRACT in prompt:
             return prompt
-        return f"{prompt}\n\n{TEAM_LEAD_PR_CHECK_ACCEPTANCE_CONTRACT}"
+        capability_lines = ["Allowed typed capabilities by role:"]
+        for role, caps in sorted(ROLE_CAPABILITIES.items()):
+            capability_lines.append(f"- {role}: {', '.join(sorted(caps))}")
+        return f"{prompt}\n\n{TEAM_LEAD_ASSIGNMENT_CONTRACT}\n" + "\n".join(capability_lines)
 
+    _wrapped._role_policy_wrapped = True  # type: ignore[attr-defined]
     return _wrapped
 
 
-def _wrap_role_summary_instructions(original):
-    def _wrapped(role: str) -> str:
-        instructions = original(role)
-        if str(role or "").strip().lower() != "publisher":
-            return instructions
-        extra = (
-            " If checks fail but are unrelated to this PR change, include pr_checks.failure_analysis "
-            "with classification, change_related=false, evidence, failing_tests, and requires_coder_fix=false. "
-            "Do not use PASS for unclear or PR-related failures."
-        )
-        if "pr_checks.failure_analysis" in instructions:
-            return instructions
-        return instructions + extra
+def _wrap_structural_team_lead_validator(original: Any) -> Any:
+    if getattr(original, "_role_policy_wrapped", False):
+        return original
 
+    def _wrapped(decision: Any, state: JsonDict | None = None):
+        result = original(decision, state) if state is not None else original(decision)
+        ok, reason = validate_team_lead_assignment_policy(decision)
+        if ok:
+            return result
+        if isinstance(result, tuple):
+            if len(result) == 2:
+                return False, reason
+            if len(result) == 3:
+                return False, reason, result[2]
+        return False, reason
+
+    _wrapped._role_policy_wrapped = True  # type: ignore[attr-defined]
     return _wrapped
 
 
 def install_runtime_policy_hooks() -> None:
-    """Install deterministic role-policy hooks without forbidden-word matching."""
+    """Install deterministic role-policy hooks without forbidden-word matching.
 
+    This deliberately overrides the old Scout prose scanner. The replacement
+    checks typed capabilities only, so words such as "resolution" or
+    "implementation history" cannot accidentally block a factual Scout task.
+    """
     from . import nodes, prompts
 
-    if getattr(nodes, "_p2_role_policy_hooks_installed", False):
+    if getattr(nodes, "_role_policy_hooks_installed", False):
         return
 
-    def _validate_scout_assignment_without_forbidden_words(decision: Any) -> tuple[bool, str | None]:
+    def _validate_scout_assignment_without_prose_scanning(decision: Any) -> tuple[bool, str | None]:
         return validate_team_lead_assignment_policy(decision)
 
-    nodes._enforce_scout_facts_only_decision = _validate_scout_assignment_without_forbidden_words
+    nodes._enforce_scout_facts_only_decision = _validate_scout_assignment_without_prose_scanning
 
-    original_checks = getattr(nodes, "_publisher_pr_checks_ok", None)
-    if callable(original_checks):
-        nodes._publisher_pr_checks_ok = _wrap_publisher_pr_checks_ok(original_checks)
+    original_nodes_role_prompt = getattr(nodes, "build_role_prompt", None)
+    if callable(original_nodes_role_prompt):
+        nodes.build_role_prompt = _wrap_role_prompt_builder(original_nodes_role_prompt)
 
-    original_nodes_build_role_prompt = getattr(nodes, "build_role_prompt", None)
-    if callable(original_nodes_build_role_prompt):
-        nodes.build_role_prompt = _wrap_role_prompt_builder(original_nodes_build_role_prompt)
-
-    original_prompts_build_role_prompt = getattr(prompts, "build_role_prompt", None)
-    if callable(original_prompts_build_role_prompt):
-        prompts.build_role_prompt = _wrap_role_prompt_builder(original_prompts_build_role_prompt)
+    original_prompts_role_prompt = getattr(prompts, "build_role_prompt", None)
+    if callable(original_prompts_role_prompt):
+        prompts.build_role_prompt = _wrap_role_prompt_builder(original_prompts_role_prompt)
 
     original_nodes_team_lead_prompt = getattr(nodes, "build_team_lead_decision_prompt", None)
     if callable(original_nodes_team_lead_prompt):
-        nodes.build_team_lead_decision_prompt = _wrap_team_lead_decision_prompt_builder(original_nodes_team_lead_prompt)
+        nodes.build_team_lead_decision_prompt = _wrap_team_lead_decision_prompt_builder(
+            original_nodes_team_lead_prompt
+        )
 
     original_prompts_team_lead_prompt = getattr(prompts, "build_team_lead_decision_prompt", None)
     if callable(original_prompts_team_lead_prompt):
-        prompts.build_team_lead_decision_prompt = _wrap_team_lead_decision_prompt_builder(original_prompts_team_lead_prompt)
+        prompts.build_team_lead_decision_prompt = _wrap_team_lead_decision_prompt_builder(
+            original_prompts_team_lead_prompt
+        )
 
-    original_prompts_summary = getattr(prompts, "build_role_summary_instructions", None)
-    if callable(original_prompts_summary):
-        prompts.build_role_summary_instructions = _wrap_role_summary_instructions(original_prompts_summary)
+    # Some local versions have a separate Team Lead structural validator.
+    # Patch it when present, but do not require it for compatibility.
+    original_validator = getattr(nodes, "_validate_team_lead_decision", None)
+    if callable(original_validator):
+        nodes._validate_team_lead_decision = _wrap_structural_team_lead_validator(original_validator)
 
-    original_nodes_summary = getattr(nodes, "build_role_summary_instructions", None)
-    if callable(original_nodes_summary):
-        nodes.build_role_summary_instructions = _wrap_role_summary_instructions(original_nodes_summary)
-
-    nodes._p2_role_policy_hooks_installed = True
+    nodes._role_policy_hooks_installed = True
