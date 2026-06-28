@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 from .reports import compact_validation_profile
+from .role_catalog import TEAM_LEAD_ALLOWED_ROLES, capability_matrix_text, role_contract_footer
+from .work_order_policy import surface_policy_matrix_text
 
 JsonDict = dict[str, Any]
 
@@ -12,17 +14,6 @@ NEED_FIX_ACTIONS = {"NEED_FIX", "FIX", "REWORK", "RETRY", "NEED_MORE_RESEARCH", 
 BLOCK_ACTIONS = {"BLOCKER", "BLOCK", "FAILED", "FAIL"}
 TEAM_LEAD_RUN_ACTIONS = {"RUN_ROLE", "RETRY_ROLE"}
 TEAM_LEAD_STOP_ACTIONS = {"STOP_COMPLETED", "STOP_BLOCKED", "ASK_HUMAN"}
-TEAM_LEAD_ALLOWED_ROLES = {
-    "scout",
-    "research",
-    "senior_staff_engineer",
-    "architect",
-    "coder",
-    "qa",
-    "reviewer",
-    "publisher",
-}
-
 EXTERNAL_CURRENT_DOC_DOMAINS = (
     "external/current APIs, specs, CI syntax, package APIs, framework behavior, "
     "cloud APIs, Kubernetes specs, Docker Compose specs, Terraform providers, "
@@ -820,16 +811,9 @@ Current workflow step: {steps}/{max_steps}
 Workflow history:
 {_team_lead_history_sections(state)}
 
-Allowed specialist roles / capability matrix:
-- scout: read-only repository/workspace/log context discovery; facts only; no writes, tests, builds, installs, commits, pushes, or PRs.
-- research: external best-practice / target-runtime research; uses local-docs/searxNcrawl when current docs matter; no repository writes, tests, builds, installs, commits, pushes, or PRs.
-- senior_staff_engineer: execution contract, assumption ledger, strategy gate; no repository writes, tests, builds, installs, commits, pushes, or PRs.
-- architect: read-only implementation plan; no repository writes, tests, builds, installs, commits, pushes, or PRs.
-- coder: local implementation and relevant self-validation; may modify workspace files; must not create branches for publication, commit, push, create/update PRs, or use GitHub write credentials.
-- qa: validation engineer; compile/build/run targeted checks when materially useful; no implementation, commits, pushes, or PRs.
-- reviewer: independent review of actual diff, validation evidence or explicit QA waiver, and code quality; no implementation, commits, pushes, or PRs.
-- publisher: the only role allowed to commit/push/publish, create/find GitHub PRs, post bounded external comments/announcements when assigned, and inspect/wait for PR checks/statuses.
+{capability_matrix_text()}
 
+{surface_policy_matrix_text()}
 Current-role assignment boundary:
 - `instructions` must contain only work that the selected `next_role` is allowed to perform now.
 - Do not put future workflow steps into `instructions`; put them only into `future_workflow_plan`.
@@ -940,7 +924,13 @@ FINAL_ROLE_REPORT_JSON: {example}""".strip()
 def with_role_report_footer(role: str, prompt: str) -> str:
     if (role or "").lower() == "team_lead":
         return prompt
-    return (prompt.rstrip() + "\n\n" + role_report_footer(role)).strip()
+    return (
+        prompt.rstrip()
+        + "\n\n"
+        + role_contract_footer(role)
+        + "\n\n"
+        + role_report_footer(role)
+    ).strip()
 
 
 def build_role_prompt(role: str, state: JsonDict) -> str:

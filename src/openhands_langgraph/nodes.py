@@ -29,6 +29,15 @@ from .prompts import (
 from .reports import parse_role_report, report_required_target_gaps
 from .state import JsonDict, OpenHandsGraphState
 from .team_lead import DirectLLMTeamLeadRunner, TeamLeadDecision, TeamLeadDecisionResult
+from .role_policy import validate_team_lead_assignment_policy
+from .work_order_policy import (
+    is_external_publication_order,
+    is_repository_work_order,
+    validate_work_order_role_selection,
+    work_order_forbids_role,
+    work_order_strategy,
+    work_order_surface,
+)
 
 
 class OpenHandsLangGraphError(RuntimeError):
@@ -1400,27 +1409,21 @@ def _repository_documentation_gate_ok(state: OpenHandsGraphState, decision: Team
 
 
 def _work_order_dict(decision: TeamLeadDecision) -> JsonDict:
-    value = getattr(decision, "work_order", None)
-    if hasattr(value, "model_dump"):
-        dumped = value.model_dump(mode="python")
-        return dumped if isinstance(dumped, dict) else {}
-    return value if isinstance(value, dict) else {}
+    from .work_order_policy import decision_work_order
+
+    return decision_work_order(decision)
 
 
 def _work_order_surface(decision: TeamLeadDecision) -> str:
-    return str(_work_order_dict(decision).get("change_surface") or "repository").strip().lower()
+    return work_order_surface(decision)
 
 
 def _work_order_strategy(decision: TeamLeadDecision) -> str:
-    return str(_work_order_dict(decision).get("execution_strategy") or "repo_change").strip().lower()
+    return work_order_strategy(decision)
 
 
 def _work_order_forbids_role(decision: TeamLeadDecision, role: str) -> bool:
-    work_order = _work_order_dict(decision)
-    forbidden = work_order.get("forbidden_roles")
-    if not isinstance(forbidden, list):
-        return False
-    return role in {str(item or "").strip().lower() for item in forbidden}
+    return work_order_forbids_role(decision, role)
 
 
 def _has_discovery_evidence(state: OpenHandsGraphState) -> bool:
@@ -1554,30 +1557,15 @@ def _line_has_forbidden_publishing_instruction(line: str) -> bool:
 
 
 def _assignment_scope_ok(decision: TeamLeadDecision) -> tuple[bool, str | None]:
-    next_role = str(decision.next_role or "").strip().lower()
-    if not next_role or next_role not in _NON_PUBLISHER_ROLES:
-        return True, None
+    """Validate assignment by typed capabilities instead of prose keywords.
 
-    # Do not trust the Team Lead's self-reported assignment_scope_check as a
-    # structural rejection signal. Small/local models can easily set
-    # publishing_actions_in_non_publisher_assignment=true because publishing is
-    # mentioned in future_workflow_plan, even when the current role instructions
-    # are safe. The validator is the authority: reject only actual forbidden
-    # publishing instructions assigned to the current non-Publisher role.
-    instructions = str(getattr(decision, "instructions", "") or "")
-    bad_lines = [
-        line.strip()
-        for line in re.split(r"[\n;]+", instructions)
-        if _line_has_forbidden_publishing_instruction(line)
-    ]
-    if bad_lines:
-        return (
-            False,
-            f"Invalid Team Lead decision: next_role={next_role} instructions contain non-{next_role} publishing work: "
-            + "; ".join(bad_lines[:3])
-            + ". Keep instructions limited to current-role work and put future publishing steps in future_workflow_plan.",
-        )
-    return True, None
+    Free-form instructions are guidance for the selected role. Permissions are
+    expressed through role_catalog capabilities and work_order policy, so terms
+    such as push, commit, PR, release, or build can safely appear as factual
+    objects in discovery/review instructions.
+    """
+
+    return validate_team_lead_assignment_policy(decision)
 
 
 def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
@@ -1590,9 +1578,7 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return False, ids_error
 
     if action == "STOP_COMPLETED":
-        surface = _work_order_surface(decision)
-        strategy = _work_order_strategy(decision)
-        if surface == "external_publication" or strategy == "direct_external_api":
+        if is_external_publication_order(decision):
             return _external_publication_stop_gate(state, decision)
 
         policy = _decision_policy(decision)
@@ -1626,13 +1612,12 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return False, retry_error
 
     next_role = decision.next_role
-    if _work_order_forbids_role(decision, next_role):
-        return False, f"Work order forbids role: {next_role}"
     surface = _work_order_surface(decision)
     strategy = _work_order_strategy(decision)
 
-    if surface == "external_publication" and next_role in {"coder", "qa", "reviewer"}:
-        return False, f"External publication work order must not route to {next_role} unless repository changes are required"
+    role_policy_ok, role_policy_error = validate_work_order_role_selection(decision, next_role)
+    if not role_policy_ok:
+        return False, role_policy_error
 
     if next_role == "scout":
         return _enforce_scout_facts_only_decision(decision)
@@ -1656,7 +1641,7 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         return _qa_skip_ok(state, decision)
 
     if next_role == "publisher":
-        if surface == "external_publication" or strategy == "direct_external_api":
+        if is_external_publication_order(decision):
             return _external_publication_publisher_gate(state, decision)
         if not _latest_coder_pass_result(state):
             return False, "Publisher cannot run before a usable Coder PASS"
@@ -1677,26 +1662,17 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
 
 
 def _enforce_scout_facts_only_decision(decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    """Scout safety is capability-based; prompt still asks for facts only.
+
+    The old implementation rejected assignments by keywords such as "root cause"
+    or "build", which created false positives for factual CI/GitHub Actions
+    discovery. The role catalog now constrains Scout to read-only capabilities;
+    if Team Lead asks for write/test/build capabilities, validation rejects it.
+    """
+
     if decision.next_role != "scout":
         return True, None
-    text = f"{decision.instructions or ''}\n{decision.reason or ''}".lower()
-    forbidden = [
-        "root cause",
-        "root-cause",
-        "hypothesis",
-        "hypothesize",
-        "solution",
-        "fix plan",
-        "implement",
-        "patch",
-        "run tests",
-        "build",
-    ]
-    if any(marker in text for marker in forbidden):
-        return False, SCOUT_FACTS_ONLY_INSTRUCTIONS
-    if "fact" not in text and "context" not in text:
-        return False, SCOUT_FACTS_ONLY_INSTRUCTIONS
-    return True, None
+    return validate_team_lead_assignment_policy(decision)
 
 
 async def _build_team_lead_runner(state: OpenHandsGraphState, config: Optional[RunnableConfig]) -> DirectLLMTeamLeadRunner:

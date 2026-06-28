@@ -4,6 +4,9 @@ import json
 from typing import Any, Literal
 
 import httpx
+
+from .role_catalog import TEAM_LEAD_ALLOWED_ROLES
+from .work_order_policy import EXECUTION_STRATEGIES, WORK_ORDER_SURFACES, normalize_strategy, normalize_surface
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 JsonDict = dict[str, Any]
@@ -15,16 +18,7 @@ _ALLOWED_ACTIONS = {
     "STOP_BLOCKED",
     "ASK_HUMAN",
 }
-_ALLOWED_ROLES = {
-    "scout",
-    "research",
-    "senior_staff_engineer",
-    "architect",
-    "coder",
-    "qa",
-    "reviewer",
-    "publisher",
-}
+_ALLOWED_ROLES = set(TEAM_LEAD_ALLOWED_ROLES)
 
 
 def _coerce_string_list(value: Any) -> list[str]:
@@ -213,29 +207,10 @@ class TeamLeadWorkOrder(BaseModel):
 
     intent: str | None = None
     target_system: str | None = None
-    change_surface: Literal[
-        "none",
-        "repository",
-        "external_publication",
-        "live_server",
-        "kubernetes_cluster",
-        "monitoring",
-        "database",
-        "network",
-        "security",
-        "unknown",
-    ] = "repository"
+    change_surface: str = "repository"
     artifact_kind: str | None = None
-    execution_strategy: Literal[
-        "answer_only",
-        "repo_change",
-        "direct_external_api",
-        "direct_live_execution",
-        "iac_or_gitops",
-        "investigation_only",
-        "unknown",
-    ] = "repo_change"
-    risk_level: Literal["low", "medium", "high", "critical"] | None = None
+    execution_strategy: str = "repo_change"
+    risk_level: str | None = None
     requires_human_approval: bool | None = None
     requires_rollback_plan: bool | None = None
     requires_validation: bool | None = None
@@ -246,6 +221,22 @@ class TeamLeadWorkOrder(BaseModel):
     documentation_required: bool | None = None
     documentation_reason: str | None = None
     documentation_targets: list[str] = Field(default_factory=list)
+
+    @field_validator("change_surface", mode="before")
+    @classmethod
+    def _normalize_surface(cls, value: Any) -> str:
+        return normalize_surface(value)
+
+    @field_validator("execution_strategy", mode="before")
+    @classmethod
+    def _normalize_strategy(cls, value: Any) -> str:
+        return normalize_strategy(value)
+
+    @field_validator("risk_level", mode="before")
+    @classmethod
+    def _normalize_work_order_risk(cls, value: Any) -> str | None:
+        text = str(value or "").strip().lower()
+        return text if text in {"low", "medium", "high", "critical"} else None
 
     @field_validator(
         "required_evidence",
@@ -272,16 +263,7 @@ class TeamLeadDecision(BaseModel):
     risk_level: Literal["low", "medium", "high", "critical"] | None = None
     blocking: bool = False
     blocking_summary: list[str] = Field(default_factory=list)
-    next_role: Literal[
-        "scout",
-        "research",
-        "senior_staff_engineer",
-        "architect",
-        "coder",
-        "qa",
-        "reviewer",
-        "publisher",
-    ] | None = None
+    next_role: str | None = None
     role_instance: str | None = None
     work_order: TeamLeadWorkOrder = Field(default_factory=TeamLeadWorkOrder)
     capabilities_required: list[str] = Field(default_factory=list)
