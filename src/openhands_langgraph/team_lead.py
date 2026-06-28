@@ -4,7 +4,7 @@ import json
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 JsonDict = dict[str, Any]
 
@@ -60,6 +60,46 @@ def _coerce_string_list(value: Any) -> list[str]:
                 items.append(str(item).strip())
         return [item for item in items if item]
     return [str(value).strip()] if str(value).strip() else []
+
+
+def _normalize_team_lead_decision_payload(value: Any) -> Any:
+    """Normalize common local-LLM JSON shape mistakes before Pydantic validation.
+
+    This is intentionally done before model construction, not only through field
+    validators, so direct runner errors report policy issues rather than raw type
+    mismatches when a model returns comma-separated strings for array fields.
+    """
+
+    if not isinstance(value, dict):
+        return value
+
+    data: JsonDict = dict(value)
+    for key in (
+        "blocking_summary",
+        "capabilities_required",
+        "context_sources",
+        "future_workflow_plan",
+    ):
+        if key in data:
+            data[key] = _coerce_string_list(data.get(key))
+
+    work_order = data.get("work_order")
+    if isinstance(work_order, dict):
+        work_order_data: JsonDict = dict(work_order)
+        for key in ("required_evidence", "completed_evidence", "forbidden_roles", "preferred_roles"):
+            if key in work_order_data:
+                work_order_data[key] = _coerce_string_list(work_order_data.get(key))
+        data["work_order"] = work_order_data
+
+    policy = data.get("policy_evaluation")
+    if isinstance(policy, dict):
+        policy_data: JsonDict = dict(policy)
+        for key in ("blocking_reasons", "accepted_risks"):
+            if key in policy_data:
+                policy_data[key] = _coerce_string_list(policy_data.get(key))
+        data["policy_evaluation"] = policy_data
+
+    return data
 
 class TeamLeadPolicyEvaluation(BaseModel):
     """Structured rationale for Team Lead routing decisions.
@@ -237,6 +277,11 @@ class TeamLeadDecision(BaseModel):
     accepted_report_ids: TeamLeadAcceptedReportIds = Field(default_factory=TeamLeadAcceptedReportIds)
     policy_evaluation: TeamLeadPolicyEvaluation = Field(default_factory=TeamLeadPolicyEvaluation)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_decision_payload(cls, value: Any) -> Any:
+        return _normalize_team_lead_decision_payload(value)
+
     @field_validator(
         "blocking_summary",
         "capabilities_required",
@@ -249,7 +294,7 @@ class TeamLeadDecision(BaseModel):
         return _coerce_string_list(value)
 
     def normalized(self) -> "TeamLeadDecision":
-        data = self.model_dump(mode="python")
+        data = _normalize_team_lead_decision_payload(self.model_dump(mode="python"))
         data["action"] = str(data.get("action") or "").strip().upper().replace("-", "_").replace(" ", "_")
         if data["action"] not in _ALLOWED_ACTIONS:
             raise ValueError(f"unsupported Team Lead action: {data['action']}")
@@ -371,7 +416,7 @@ class DirectLLMTeamLeadRunner:
                     data = response.json()
                 text = _extract_chat_completion_text(data)
                 last_text = text
-                parsed = _parse_json_object(text)
+                parsed = _normalize_team_lead_decision_payload(_parse_json_object(text))
                 decision = TeamLeadDecision.model_validate(parsed).normalized()
                 return TeamLeadDecisionResult(
                     decision=decision,
