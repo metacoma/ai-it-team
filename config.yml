@@ -1,0 +1,9 @@
+roles:
+  scout: openai/qwen36-27b
+  research: openai/qwen36-27b
+  senior_staff_engineer: openai/qwen36-35b
+  architect: openai/qwen36-35b
+  coder: openai/qwen36-35b
+  qa: openai/qwen36-27b
+  reviewer: openai/qwen36-27b
+  publisher: openai/qwen36-35b
