@@ -29,6 +29,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "summarize_facts",
             "identify_research_domains",
             "identify_validation_targets",
+            "identify_documentation_targets",
             "report_unknowns",
         }
     ),
@@ -50,6 +51,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "define_strategy",
             "define_acceptance_criteria",
             "define_validation_plan",
+            "assess_documentation_impact",
         }
     ),
     "architect": frozenset(
@@ -58,6 +60,8 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "design_plan",
             "define_acceptance_criteria",
             "define_validation_plan",
+            "assess_documentation_impact",
+            "define_documentation_targets",
         }
     ),
     "coder": frozenset(
@@ -66,6 +70,8 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "edit_files",
             "install_deps",
             "run_validation",
+            "assess_documentation_impact",
+            "update_documentation",
             "summarize_changes",
         }
     ),
@@ -75,6 +81,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "install_validation_deps",
             "run_validation",
             "inspect_test_results",
+            "validate_documentation",
             "summarize_validation",
         }
     ),
@@ -84,6 +91,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[str]] = {
             "inspect_diff",
             "run_lightweight_checks",
             "review_risk",
+            "review_documentation",
             "summarize_review",
         }
     ),
@@ -128,6 +136,7 @@ Additional Team Lead assignment contract:
 - Put future-role work in future_workflow_plan, but the deterministic validator will not reject current instructions by keyword.
 - Team Lead must classify each task into work_order before routing specialist roles.
 - Publisher normally follows implementation evidence from Coder/QA/Reviewer for repository work orders.
+- For repository/repo_change work orders after Coder PASS, documentation impact must be assessed before publishing/completion. Documentation is either updated or explicitly waived with a concrete reason.
 - For external_publication/direct_external_api tasks where repository changes are not required, Team Lead may route directly to Publisher after Scout/Research evidence is sufficient.
 - Direct external publication without Coder PASS requires structured work_order and policy_evaluation acceptance: can_publish=true, no_repo_changes_accepted=true, publication_target_verified/target_verified=true, and publication_content_reviewed/content_prepared=true.
 - Completion for external publication requires publisher_publication_evidence_accepted=true and structured publication evidence; it must not require PR/check evidence.

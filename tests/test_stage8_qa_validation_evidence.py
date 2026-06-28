@@ -267,6 +267,14 @@ def _qa_pass_result(role_instance: str = "qa-2") -> dict:
                     "createChild, moveNode, setNodeText still lack EDT dispatch (latent bugs, deferred to follow-up)",
                 ],
             },
+            "documentation": {
+                "impact_assessed": True,
+                "required": False,
+                "updated": False,
+                "files": [],
+                "reason": "QA verified this targeted internal fix does not require docs updates.",
+                "waiver_reason": "No public behavior, config, CLI, API, deployment workflow, examples, or installation docs changed.",
+            },
         },
         "answer": "QA report with targeted integration validation evidence",
     }
@@ -376,6 +384,14 @@ def _reviewer_prose_pass_result(role_instance: str = "reviewer-1") -> dict:
         "summary": {
             "action": "PASS",
             "summary": "Two-part fix verified. QA full runtime validation completed in sandbox with Java build SUCCESS, Xvfb + Freeplane runtime, and integration/smoke tests passed. Diff review and syntax/static checks are acceptable.",
+            "documentation": {
+                "impact_assessed": True,
+                "required": False,
+                "updated": False,
+                "files": [],
+                "reason": "Reviewer inspected the diff and accepted the docs waiver.",
+                "waiver_reason": "No public behavior, config, CLI, API, deployment workflow, examples, or installation docs changed.",
+            },
         },
         "answer": """
 # Reviewer Report
@@ -429,7 +445,11 @@ def test_publisher_gate_uses_latest_qa_and_reviewer_after_recovered_qa_failure()
         summary="publish",
         action="RUN_ROLE",
         next_role="publisher",
-        policy_evaluation={"can_publish": True},
+        policy_evaluation={
+            "can_publish": True,
+            "documentation_impact_assessed": True,
+            "documentation_updated_or_waived": True,
+        },
     )
     ok, reason = _validate_team_lead_decision(state, decision)
     assert ok is True
@@ -453,7 +473,18 @@ def test_publisher_gate_reports_reviewer_reason_separately() -> None:
                 "role_instance": "reviewer-1",
                 "ok": True,
                 "summary_action": "PASS",
-                "summary": {"action": "PASS", "summary": "Looks good."},
+                "summary": {
+                    "action": "PASS",
+                    "summary": "Looks good.",
+                    "documentation": {
+                        "impact_assessed": True,
+                        "required": False,
+                        "updated": False,
+                        "files": [],
+                        "reason": "Reviewer inspected the diff and accepted the docs waiver.",
+                        "waiver_reason": "No public behavior, config, CLI, API, deployment workflow, examples, or installation docs changed.",
+                    },
+                },
                 "answer": "Looks good but no validation review.",
             },
         ],
@@ -471,7 +502,11 @@ def test_publisher_gate_reports_reviewer_reason_separately() -> None:
         summary="publish",
         action="RUN_ROLE",
         next_role="publisher",
-        policy_evaluation={"can_publish": True},
+        policy_evaluation={
+            "can_publish": True,
+            "documentation_impact_assessed": True,
+            "documentation_updated_or_waived": True,
+        },
     )
     ok, reason = _validate_team_lead_decision(state, decision_with_publish)
     assert ok is True

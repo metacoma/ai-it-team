@@ -1280,6 +1280,125 @@ def _publisher_publication_ok(result: JsonDict | None) -> tuple[bool, str | None
     return True, None
 
 
+def _documentation_from_result(result: JsonDict | None) -> JsonDict:
+    if not isinstance(result, dict):
+        return {}
+    summary = _summary_dict(result)
+    for candidate in (
+        summary.get("documentation"),
+        (result.get("role_report") or {}).get("documentation") if isinstance(result.get("role_report"), dict) else None,
+        _extract_answer_object(result, "documentation"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _latest_documentation_evidence_result(state: OpenHandsGraphState) -> tuple[str | None, JsonDict | None]:
+    """Return the strongest documentation evidence after the latest Coder PASS.
+
+    Reviewer/QA evidence is preferred because it means documentation consistency
+    was independently checked. If those roles were explicitly skipped, Coder
+    self-evidence can still satisfy the structural gate.
+    """
+
+    coder_idx = _latest_coder_pass_index(state)
+    for role in ("reviewer", "qa"):
+        result = _latest_pass_result_for_role_after_index(state, role, coder_idx)
+        if result and _documentation_from_result(result):
+            return role, result
+    coder = _latest_coder_pass_result(state)
+    if coder and _documentation_from_result(coder):
+        return "coder", coder
+    return None, None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "yes", "y", "1", "required", "needed"}:
+        return True
+    if text in {"false", "no", "n", "0", "not_required", "not-required", "not required", "none", "n/a", "na"}:
+        return False
+    return None
+
+
+def _documentation_evidence_ok(evidence: JsonDict, policy: JsonDict | None = None) -> tuple[bool, str | None]:
+    policy = policy or {}
+    if not isinstance(evidence, dict) or not evidence:
+        return False, "Missing structured documentation evidence"
+    if not _truthy(evidence.get("impact_assessed")):
+        return False, "documentation.impact_assessed must be true"
+
+    required = _bool_or_none(evidence.get("required"))
+    if required is None:
+        required = _bool_or_none(policy.get("documentation_required"))
+    if required is None:
+        return False, "documentation.required must be true or false"
+
+    if required:
+        updated = evidence.get("updated")
+        if updated is None:
+            updated = policy.get("documentation_updated")
+        if not _truthy(updated):
+            return False, "documentation.required=true requires documentation.updated=true"
+        files = evidence.get("files") or evidence.get("updated_files") or []
+        if isinstance(files, str):
+            files = [item.strip() for item in files.replace(";", ",").split(",") if item.strip()]
+        if not _nonempty_list(files):
+            return False, "documentation.required=true requires at least one documentation file"
+        return True, None
+
+    waiver = evidence.get("waiver_reason") or evidence.get("reason") or policy.get("documentation_waiver_reason")
+    if not _non_empty_string(waiver):
+        return False, "documentation.required=false requires a concrete waiver_reason"
+    return True, None
+
+
+def _repository_documentation_gate_ok(state: OpenHandsGraphState, decision: TeamLeadDecision) -> tuple[bool, str | None]:
+    """Repository work cannot be published/completed without docs impact evidence.
+
+    This gate intentionally does not apply to external publication/direct API
+    work orders. For repository changes, documentation is either updated or
+    explicitly waived with a concrete reason.
+    """
+
+    surface = _work_order_surface(decision)
+    strategy = _work_order_strategy(decision)
+    if surface != "repository" and strategy != "repo_change":
+        return True, None
+    if not _latest_coder_pass_result(state):
+        return True, None
+
+    policy = _decision_policy(decision)
+    if not _truthy(policy.get("documentation_impact_assessed")):
+        return False, "Repository publishing/completion requires policy_evaluation.documentation_impact_assessed=true"
+    if not (
+        _truthy(policy.get("documentation_updated_or_waived"))
+        or _truthy(policy.get("documentation_evidence_accepted"))
+    ):
+        return False, "Repository publishing/completion requires documentation_updated_or_waived=true or documentation_evidence_accepted=true"
+
+    source_role, result = _latest_documentation_evidence_result(state)
+    evidence = _documentation_from_result(result)
+    ok, reason = _documentation_evidence_ok(evidence, policy)
+    if not ok:
+        return False, reason
+
+    reviewer = _reviewer_pass_after_validation_gate(state)
+    qa = _qa_pass_after_latest_coder(state)
+    if reviewer and source_role != "reviewer":
+        return False, "Reviewer PASS must include structured documentation evidence"
+    if not reviewer and qa and source_role != "qa":
+        return False, "QA PASS must include structured documentation evidence when Reviewer is skipped"
+    return True, None
+
+
 def _work_order_dict(decision: TeamLeadDecision) -> JsonDict:
     value = getattr(decision, "work_order", None)
     if hasattr(value, "model_dump"):
@@ -1479,6 +1598,9 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
         policy = _decision_policy(decision)
         if not _truthy(policy.get("can_complete")):
             return False, "STOP_COMPLETED requires policy_evaluation.can_complete=true"
+        docs_ok, docs_error = _repository_documentation_gate_ok(state, decision)
+        if not docs_ok:
+            return False, docs_error
         if not _truthy(policy.get("publisher_pr_checks_accepted")):
             return False, "STOP_COMPLETED requires publisher_pr_checks_accepted=true"
         publisher = _latest_pass_result_for_role(state, "publisher")
@@ -1546,6 +1668,9 @@ def _validate_team_lead_decision(state: OpenHandsGraphState, decision: TeamLeadD
             return False, reviewer_error
         if not _truthy(_decision_policy(decision).get("can_publish")):
             return False, "Publisher requires policy_evaluation.can_publish=true"
+        docs_ok, docs_error = _repository_documentation_gate_ok(state, decision)
+        if not docs_ok:
+            return False, docs_error
         return True, None
 
     return True, None

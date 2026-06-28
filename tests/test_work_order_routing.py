@@ -222,3 +222,146 @@ def test_team_lead_pre_normalizer_converts_nested_string_lists_before_validation
     assert decision.work_order.required_evidence == ["repo_exists_or_created", "issue_created"]
     assert decision.capabilities_required == ["create_issue", "publish_comment"]
     assert decision.policy_evaluation.accepted_risks == ["low-risk external publication"]
+
+
+def _repository_decision(action: str, next_role: str | None = None) -> TeamLeadDecision:
+    decision = TeamLeadDecision(
+        valid=True,
+        status="completed",
+        summary="repository routing",
+        action=action,
+        risk_level="medium",
+        blocking=False,
+        blocking_summary=[],
+        next_role=next_role,
+        role_instance=f"{next_role}-1" if next_role else None,
+        context_sources=[],
+        instructions="Publish the repository change." if next_role == "publisher" else "",
+        reason="Repository change requires strict delivery gates.",
+    )
+    decision.work_order = {
+        "intent": "fix_code",
+        "target_system": "repository",
+        "change_surface": "repository",
+        "artifact_kind": "pull_request",
+        "execution_strategy": "repo_change",
+        "required_evidence": ["implementation", "documentation_updated_or_waived", "pr_checks"],
+    }
+    return decision
+
+
+def test_repository_publisher_rejects_missing_documentation_evidence() -> None:
+    coder = _pass_result("coder", "coder-report-1")
+    qa = _pass_result("qa", "qa-report-1")
+    reviewer = _pass_result("reviewer", "reviewer-report-1")
+    state = {"role_results": [coder, qa, reviewer]}
+    decision = _repository_decision("RUN_ROLE", "publisher")
+    decision.policy_evaluation = {
+        "can_publish": True,
+        "documentation_impact_assessed": True,
+        "documentation_updated_or_waived": True,
+    }
+
+    ok, reason = _validate_team_lead_decision(state, decision)
+
+    assert ok is False
+    assert reason is not None
+    assert "documentation" in reason.lower()
+
+
+def test_repository_publisher_accepts_reviewer_documentation_waiver() -> None:
+    coder = _pass_result(
+        "coder",
+        "coder-report-1",
+        {
+            "role": "coder",
+            "report_id": "coder-report-1",
+            "action": "PASS",
+            "documentation": {
+                "impact_assessed": True,
+                "required": False,
+                "updated": False,
+                "files": [],
+                "reason": "Internal helper refactor only.",
+                "waiver_reason": "No user-facing behavior, config, CLI, API, deployment, workflow, examples, or installation docs changed.",
+            },
+        },
+    )
+    qa = _pass_result("qa", "qa-report-1")
+    reviewer = _pass_result(
+        "reviewer",
+        "reviewer-report-1",
+        {
+            "role": "reviewer",
+            "report_id": "reviewer-report-1",
+            "action": "PASS",
+            "documentation": {
+                "impact_assessed": True,
+                "required": False,
+                "updated": False,
+                "files": [],
+                "reason": "Reviewer inspected the diff and confirmed the change is internal-only.",
+                "waiver_reason": "No public behavior, config, CLI, API, deployment workflow, examples, or installation docs changed.",
+            },
+        },
+    )
+    state = {"role_results": [coder, qa, reviewer]}
+    decision = _repository_decision("RUN_ROLE", "publisher")
+    decision.policy_evaluation = {
+        "can_publish": True,
+        "documentation_impact_assessed": True,
+        "documentation_updated_or_waived": True,
+    }
+
+    ok, reason = _validate_team_lead_decision(state, decision)
+
+    assert ok is True, reason
+
+
+def test_repository_publisher_accepts_required_docs_updated() -> None:
+    documentation = {
+        "impact_assessed": True,
+        "required": True,
+        "updated": True,
+        "files": ["README.md", "docs/work-order.md"],
+        "reason": "New CLI/work-order behavior is user-visible and documented.",
+        "waiver_reason": None,
+    }
+    coder = _pass_result("coder", "coder-report-1", {"role": "coder", "report_id": "coder-report-1", "action": "PASS", "documentation": documentation})
+    qa = _pass_result("qa", "qa-report-1", {"role": "qa", "report_id": "qa-report-1", "action": "PASS", "documentation": documentation})
+    reviewer = _pass_result("reviewer", "reviewer-report-1", {"role": "reviewer", "report_id": "reviewer-report-1", "action": "PASS", "documentation": documentation})
+    state = {"role_results": [coder, qa, reviewer]}
+    decision = _repository_decision("RUN_ROLE", "publisher")
+    decision.policy_evaluation = {
+        "can_publish": True,
+        "documentation_impact_assessed": True,
+        "documentation_updated_or_waived": True,
+        "documentation_required": True,
+        "documentation_updated": True,
+    }
+
+    ok, reason = _validate_team_lead_decision(state, decision)
+
+    assert ok is True, reason
+
+
+def test_work_order_accepts_comma_separated_documentation_targets() -> None:
+    decision = TeamLeadDecision.model_validate(
+        {
+            "valid": True,
+            "status": "completed",
+            "summary": "route repo change",
+            "action": "RUN_ROLE",
+            "next_role": "coder",
+            "work_order": {
+                "change_surface": "repository",
+                "execution_strategy": "repo_change",
+                "documentation_required": True,
+                "documentation_targets": "README.md, docs/config.md",
+            },
+            "instructions": "Implement and update docs.",
+            "reason": "Repository change.",
+        }
+    )
+
+    assert decision.work_order.documentation_targets == ["README.md", "docs/config.md"]

@@ -86,7 +86,13 @@ def _normalize_team_lead_decision_payload(value: Any) -> Any:
     work_order = data.get("work_order")
     if isinstance(work_order, dict):
         work_order_data: JsonDict = dict(work_order)
-        for key in ("required_evidence", "completed_evidence", "forbidden_roles", "preferred_roles"):
+        for key in (
+            "required_evidence",
+            "completed_evidence",
+            "forbidden_roles",
+            "preferred_roles",
+            "documentation_targets",
+        ):
             if key in work_order_data:
                 work_order_data[key] = _coerce_string_list(work_order_data.get(key))
         data["work_order"] = work_order_data
@@ -123,6 +129,12 @@ class TeamLeadPolicyEvaluation(BaseModel):
     publication_target_verified: bool | None = None
     publication_content_reviewed: bool | None = None
     no_repo_changes_accepted: bool | None = None
+    documentation_impact_assessed: bool | None = None
+    documentation_updated_or_waived: bool | None = None
+    documentation_required: bool | None = None
+    documentation_updated: bool | None = None
+    documentation_evidence_accepted: bool | None = None
+    documentation_waiver_reason: str | None = None
     target_verified: bool | None = None
     content_prepared: bool | None = None
     can_skip_discovery: bool | None = None
@@ -231,12 +243,16 @@ class TeamLeadWorkOrder(BaseModel):
     completed_evidence: list[str] = Field(default_factory=list)
     forbidden_roles: list[str] = Field(default_factory=list)
     preferred_roles: list[str] = Field(default_factory=list)
+    documentation_required: bool | None = None
+    documentation_reason: str | None = None
+    documentation_targets: list[str] = Field(default_factory=list)
 
     @field_validator(
         "required_evidence",
         "completed_evidence",
         "forbidden_roles",
         "preferred_roles",
+        "documentation_targets",
         mode="before",
     )
     @classmethod
