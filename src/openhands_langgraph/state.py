@@ -35,6 +35,10 @@ class OpenHandsGraphState(TypedDict, total=False):
     # Runtime controls for OpenHandsRoleRunner.run_role.
     role_run_options: JsonDict
 
+    # Sandbox reuse (analogous to /new command).
+    reuse_sandbox: bool
+    sandbox_cache: JsonDict  # model -> sandbox_id mapping
+
     # Stage 2 development workflow controls.
     current_role: str
     pending_role: str | None

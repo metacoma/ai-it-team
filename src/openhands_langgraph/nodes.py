@@ -284,6 +284,57 @@ def _update_role_session_from_result(
     return sessions
 
 
+async def _find_sandbox_for_model(
+    client: "OpenHandsClient",
+    model: str | None,
+    sandbox_cache: JsonDict,
+) -> str | None:
+    """Find a running sandbox associated with a given model.
+
+    Returns sandbox_id if found, None otherwise.
+    Uses sandbox_cache to avoid repeated API calls.
+    """
+    if model is None:
+        return None
+    if model in sandbox_cache:
+        cached_id = sandbox_cache[model]
+        # Verify cached sandbox is still valid
+        try:
+            sandboxes = await client.search_sandboxes(limit=100)
+            for sb in sandboxes.get("items", []):
+                if sb.get("id") == cached_id and sb.get("status") in ("RUNNING", "PAUSED"):
+                    return cached_id
+        except Exception:  # noqa: BLE001
+            pass
+        # Cached sandbox is gone or invalid, remove from cache
+        del sandbox_cache[model]
+
+    # Paginate through conversations to find one with matching model
+    page_id = None
+    limit = 100
+    while True:
+        try:
+            result = await client.search_app_conversations(
+                limit=limit,
+                page_id=page_id,
+                include_sub_conversations=False,
+            )
+        except Exception:  # noqa: BLE001
+            break
+        conversations = result.get("items", []) if isinstance(result, dict) else []
+        for conv in conversations:
+            if conv.get("llm_model") == model:
+                sandbox_id = conv.get("sandbox_id")
+                if sandbox_id:
+                    sandbox_cache[model] = sandbox_id
+                    return sandbox_id
+
+        page_id = result.get("next_page_id") if isinstance(result, dict) else None
+        if not page_id:
+            break
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Role result parsing / evidence helpers
 # ---------------------------------------------------------------------------
@@ -642,6 +693,19 @@ async def _run_role_with_prompt(
         session = _role_sessions(state).get(session_key) if persistent_session else None
         conversation_start = _session_start_from_state(session) if isinstance(session, dict) else None
         known_event_ids = _session_known_event_ids(session) if isinstance(session, dict) else None
+
+        # Sandbox reuse logic (analogous to /new command)
+        reuse_sandbox = state.get("reuse_sandbox", False)
+        sandbox_cache = dict(state.get("sandbox_cache") or {})
+        resolved_sandbox_id = state.get("sandbox_id")  # Global override takes precedence
+
+        if reuse_sandbox and not resolved_sandbox_id and not conversation_start:
+            model = _resolve_role_model(role, state)
+            if model:
+                resolved_sandbox_id = await _find_sandbox_for_model(
+                    runner.instance.client, model, sandbox_cache
+                )
+
         result = await runner.run_role(
             role=role,
             role_instance=role_instance,
@@ -652,7 +716,7 @@ async def _run_role_with_prompt(
             repository=state.get("repository"),
             branch=state.get("branch"),
             git_provider=state.get("git_provider"),
-            sandbox_id=state.get("sandbox_id"),
+            sandbox_id=resolved_sandbox_id,
             title=_role_conversation_title(role, state),
             extra_payload=state.get("extra_payload"),
             summary_instructions=summary_instructions,
@@ -746,6 +810,7 @@ async def _run_role_with_prompt(
         "final_answer": answer,
         "final_status": "completed" if result_dict.get("ok") else "failed",
         "errors": errors,
+        "sandbox_cache": sandbox_cache,
     }
     validation_profile = _role_report_validation_profile(result_dict)
     if validation_profile:

@@ -149,6 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ui", choices=["auto", "rich", "plain", "off"], default="auto", help="Human output UI mode. Default: auto (Rich dashboard when available).")
     parser.add_argument("--ui-prompt-chars", type=int, default=6000, help="Max compact prompt-context chars shown in rich UI. Full prompts are hidden. Default: 6000")
     parser.add_argument("--ui-answer-chars", type=int, default=8000, help="Max answer chars shown in rich UI panels. Default: 8000")
+    parser.add_argument("--reuse", action="store_true", help="Reuse existing sandbox for the same model instead of creating a new one (analogous to /new command)")
 
     # Conversation-list mode
     parser.add_argument("--conversation-list", action="store_true", help="List conversations and their metadata")
@@ -363,6 +364,8 @@ async def _amain(args: argparse.Namespace) -> dict[str, Any]:
         "team_lead_steps": 0,
         "max_team_lead_steps": args.max_team_lead_steps,
         "role_sessions": {},
+        "reuse_sandbox": args.reuse,
+        "sandbox_cache": {},
         "role_run_options": {
             "start_poll_interval": args.start_poll_interval,
             "websocket_retry_seconds": args.websocket_retry_seconds,

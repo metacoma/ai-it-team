@@ -418,6 +418,20 @@ unknown  -> needs_human_review
 
 Role ordering is controlled by LangGraph. LLM roles only produce answers and validated JSON summaries. Scout produces repository facts plus research domains; Research turns those domains into an external best-practices/runtime brief; Architect consumes both artifacts. Downstream prompts receive upstream answers as plain artifact blocks, not as full `RoleRunResult` JSON; compact summaries are included once for routing/status context.
 
+## Sandbox reuse (analogous to /new command)
+
+When running multi-role workflows with `--reuse`, the CLI checks for an existing sandbox matching the target model before creating a new conversation. If a matching sandbox exists, it creates a new conversation in that sandbox (like the `/new` command in the OpenHands chat UI). If no matching sandbox exists, it falls back to creating a new sandbox + conversation.
+
+```bash
+openhands-graph-run   --workflow development   --endpoint http://localhost:3000   --model openai/coder   --reuse   --prompt "implement feature X"
+```
+
+Without `--reuse`, each role gets its own sandbox + conversation (original behavior).
+
+With `--reuse`, roles using the same model share an existing sandbox. This is useful when you want multiple roles to work in the same environment without creating redundant sandboxes.
+
+The model-to-sandbox mapping is cached in graph state for the duration of the workflow run, so subsequent roles with the same model skip the API lookup.
+
 
 ## v39 validation environment reconstruction
 
