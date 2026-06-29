@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from openhands import OpenHandsInstance, OpenHandsRoleRunner
+from openhands.client import OpenHandsClient
 
 from .graph import build_development_graph, build_single_role_graph, build_team_lead_graph
 from .ui import make_workflow_ui
@@ -128,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--team-lead-model", default=os.environ.get("TEAM_LEAD_MODEL"), help="Model for tool-less Team Lead. Defaults to --model")
     parser.add_argument("--team-lead-timeout", type=float, default=120.0, help="Team Lead direct LLM timeout. Default: 120")
     parser.add_argument("--team-lead-max-attempts", type=int, default=3, help="Team Lead JSON decision attempts. Default: 3")
-    parser.add_argument("--prompt", required=True, help="Task prompt")
+    parser.add_argument("--prompt", help="Task prompt (required for workflow modes)")
     parser.add_argument("--role", default="role", help="Role name for single-role workflow. Default: role")
     parser.add_argument("--role-instance", default=None, help="Optional role instance id, e.g. architect_A")
     parser.add_argument("--repository", default=None, help="Optional selected_repository")
@@ -148,10 +149,199 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ui", choices=["auto", "rich", "plain", "off"], default="auto", help="Human output UI mode. Default: auto (Rich dashboard when available).")
     parser.add_argument("--ui-prompt-chars", type=int, default=6000, help="Max compact prompt-context chars shown in rich UI. Full prompts are hidden. Default: 6000")
     parser.add_argument("--ui-answer-chars", type=int, default=8000, help="Max answer chars shown in rich UI panels. Default: 8000")
+
+    # Conversation-list mode
+    parser.add_argument("--conversation-list", action="store_true", help="List conversations and their metadata")
+    parser.add_argument("--json", action="store_true", dest="output_json_conv", help="Output conversation list as JSON")
+
+    # Conversation-send mode
+    parser.add_argument("--conversation-send", metavar="CONVERSATION_ID", help="Send a message to an existing conversation")
+    parser.add_argument("--wait", action="store_true", help="Wait for the assistant response when sending a message")
+
     return parser
 
 
+async def _list_conversations(args: argparse.Namespace) -> dict[str, Any]:
+    """List conversations and their metadata via GET /api/v1/app-conversations/search."""
+    client = OpenHandsClient(args.endpoint, api_key=args.api_key)
+    all_conversations: list[dict[str, Any]] = []
+    page_id: str | None = None
+    limit = 100
+    has_more = True
+
+    while has_more:
+        search_result = await client.search_app_conversations(limit=limit, page_id=page_id)
+        conversations: list[dict[str, Any]] = []
+
+        if isinstance(search_result, list):
+            conversations = search_result
+        elif isinstance(search_result, dict):
+            # The search endpoint may return {"items": [...], "next_page_id": "..."}
+            # or just a list directly.
+            items = search_result.get("items") or search_result.get("conversations") or []
+            if isinstance(items, list):
+                conversations = items
+            else:
+                conversations = [search_result]
+
+        all_conversations.extend(conversations)
+
+        # Check for pagination
+        if isinstance(search_result, dict):
+            page_id = search_result.get("next_page_id") or search_result.get("page_id")
+            has_more = bool(page_id)
+        else:
+            has_more = False
+
+    # Build output records with metadata
+    records = []
+    for conv in all_conversations:
+        record: dict[str, Any] = {
+            "id": conv.get("id") or conv.get("conversation_id") or "",
+            "title": conv.get("title") or "",
+            "llm_model": conv.get("llm_model") or "",
+            "status": conv.get("execution_status") or conv.get("status") or "",
+            "sandbox_id": conv.get("sandbox_id") or "",
+            "created_at": conv.get("created_at") or conv.get("created") or "",
+            "updated_at": conv.get("updated_at") or conv.get("updated") or "",
+        }
+        records.append(record)
+
+    return {"conversations": records, "total": len(records)}
+
+
+async def _send_conversation_message(args: argparse.Namespace) -> dict[str, Any]:
+    """Send a message to an existing conversation and optionally wait for response."""
+    conversation_id = args.conversation_send
+    message_text = args.prompt  # prompt is used as the message text
+
+    if not conversation_id:
+        raise RuntimeError("--conversation-send requires a CONVERSATION_ID argument")
+    if not message_text:
+        raise RuntimeError("--conversation-send requires a message text (use --prompt)")
+
+    instance = OpenHandsInstance(args.endpoint, api_key=args.api_key, default_model=args.model)
+
+    # Attach to the existing conversation
+    conversation = await instance.attach_conversation(conversation_id, refresh=True, verbose=True)
+
+    # Get the raw conversation data to extract llm_model
+    raw_conv = await instance.client.get_app_conversation(conversation_id)
+    llm_model = ""
+    if isinstance(raw_conv, dict):
+        llm_model = raw_conv.get("llm_model") or ""
+    elif isinstance(raw_conv, list) and raw_conv:
+        llm_model = raw_conv[0].get("llm_model") if isinstance(raw_conv[0], dict) else ""
+
+    # Send the message
+    result = await instance.client.send_message_to_existing_conversation(conversation, message_text, run=True)
+
+    output: dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "message_sent": message_text,
+        "send_result": result,
+        "llm_model": llm_model,
+        "waited": args.wait,
+    }
+
+    if args.wait:
+        # Wait for the assistant response by streaming events
+        print(f"[wait] streaming events for conversation {conversation_id}...", file=sys.stderr)
+        final_text: str | None = None
+        final_status: str | None = None
+        terminal_seen = False
+        terminal_deadline: float | None = None
+        saw_agent_activity = False
+        saw_running_status = False
+
+        event_iter = instance.client.stream_v1_events(
+            conversation,
+            raw_websocket=args.raw_websocket,
+            open_timeout=20.0,
+            retry_seconds=args.websocket_retry_seconds,
+        )
+
+        try:
+            while True:
+                timeout: float | None = None
+                if terminal_seen and not final_text and terminal_deadline is not None:
+                    timeout = max(0.0, terminal_deadline - asyncio.get_running_loop().time())
+                try:
+                    if timeout is None:
+                        event = await anext(event_iter)
+                    else:
+                        event = await asyncio.wait_for(anext(event_iter), timeout=timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[warn] websocket error: {exc}", file=sys.stderr)
+                    break
+
+                kind = str(event.get("kind") or "")
+                if kind == "ActionEvent" or kind == "ObservationEvent":
+                    saw_agent_activity = True
+
+                # Extract assistant text
+                content_list = event.get("llm_message", {}).get("content", [])
+                for item in content_list:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text.strip():
+                            final_text = text
+
+                status = str(event.get("value") or "")
+                if event.get("key") == "execution_status":
+                    if status == "running":
+                        saw_running_status = True
+                    if status in {"finished", "error", "cancelled"}:
+                        final_status = status
+                        if final_text:
+                            break
+                        terminal_seen = True
+                        terminal_deadline = asyncio.get_running_loop().time() + max(0.0, args.terminal_grace_seconds)
+                        continue
+
+                # Print events if requested
+                if args.show_events:
+                    print(json.dumps(event, ensure_ascii=False), flush=True)
+
+        finally:
+            await event_iter.aclose()
+
+        # Fallback: try REST if no text was captured
+        if not final_text:
+            try:
+                fallback = await instance.client.fetch_final_text_fallback(conversation)
+                if fallback.strip():
+                    final_text = fallback
+            except Exception:  # noqa: BLE001
+                pass
+
+        output["response"] = final_text.strip() if final_text and final_text.strip() else ""
+        output["response_status"] = final_status
+        output["waited"] = True
+
+    return output
+
+
 async def _amain(args: argparse.Namespace) -> dict[str, Any]:
+    # Handle conversation-list mode
+    if args.conversation_list:
+        result = await _list_conversations(args)
+        if args.output_json_conv:
+            return {"conversations": result["conversations"], "total": result["total"]}
+        return result
+
+    # Handle conversation-send mode
+    if args.conversation_send:
+        return await _send_conversation_message(args)
+
+    # Original workflow modes require --prompt
+    if not args.prompt:
+        raise RuntimeError("--prompt is required for workflow modes (single-role, development, team-lead)")
+
     instance = OpenHandsInstance(args.endpoint, api_key=args.api_key, default_model=args.model)
     runner = OpenHandsRoleRunner(instance, summary_max_attempts=args.summary_max_attempts)
 
@@ -322,6 +512,43 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         raise SystemExit(130)
 
+    # Handle output for conversation-list mode
+    if args.conversation_list:
+        if args.output_json_conv or args.output_json:
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            conversations = result.get("conversations") or []
+            total = result.get("total", len(conversations))
+            print(f"Found {total} conversation(s):\n")
+            for conv in conversations:
+                conv_id = conv.get("id", "")
+                title = conv.get("title", "")
+                model = conv.get("llm_model", "")
+                status = conv.get("status", "")
+                print(f"  ID:       {conv_id}")
+                print(f"  Title:    {title}")
+                print(f"  Model:    {model}")
+                print(f"  Status:   {status}")
+                print()
+        raise SystemExit(0)
+
+    # Handle output for conversation-send mode
+    if args.conversation_send:
+        if args.output_json or args.output_json_conv:
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            print(f"Message sent to conversation {result.get('conversation_id', '')}")
+            if result.get("llm_model"):
+                print(f"LLM Model: {result.get('llm_model')}")
+            if result.get("waited"):
+                response = result.get("response", "")
+                if response:
+                    print(f"\nResponse:\n{response}")
+                else:
+                    print("\n[no response captured]")
+        raise SystemExit(0)
+
+    # Original workflow modes output
     if args.output_json:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     else:

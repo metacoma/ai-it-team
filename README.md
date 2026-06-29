@@ -207,6 +207,49 @@ pytest -q
 
 
 
+## Conversation management commands
+
+The CLI supports two additional modes for managing existing OpenHands conversations:
+
+### List conversations
+
+```bash
+openhands-graph-run   --endpoint http://localhost:3000   --conversation-list
+```
+
+This lists all conversations with their metadata (ID, title, LLM model, status, sandbox ID, timestamps).
+
+JSON output:
+
+```bash
+openhands-graph-run   --endpoint http://localhost:3000   --conversation-list   --json
+```
+
+### Send message to existing conversation
+
+```bash
+openhands-graph-run   --endpoint http://localhost:3000   --conversation-send <conversation-id>   --prompt "your message"
+```
+
+This sends a message to an existing conversation and returns immediately.
+
+Wait for the assistant response:
+
+```bash
+openhands-graph-run   --endpoint http://localhost:3000   --conversation-send <conversation-id>   --prompt "your message"   --wait
+```
+
+The `--wait` flag streams events from the conversation and displays the final assistant answer when the conversation reaches a terminal status.
+
+### JSON output for conversation commands
+
+Both `--conversation-list` and `--conversation-send` support `--json` for machine-readable output:
+
+```bash
+openhands-graph-run   --endpoint http://localhost:3000   --conversation-list   --json
+openhands-graph-run   --endpoint http://localhost:3000   --conversation-send <id>   --prompt "hello"   --wait   --json
+```
+
 ## v28 development workflow update
 
 The development LangGraph workflow now includes an explicit `research` role between `scout` and `architect`:
