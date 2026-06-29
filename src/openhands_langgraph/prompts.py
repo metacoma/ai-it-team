@@ -134,6 +134,9 @@ def _role_result_meta_lines(result: JsonDict | None) -> list[str]:
             "validation",
             "validation_review",
             "pr_checks",
+            "pr_feedback",
+            "repository_mutation_guard",
+            "publisher_recommendation",
         ):
             if role_report.get(key) not in (None, [], {}):
                 compact[key] = role_report.get(key)
@@ -185,7 +188,8 @@ def shared_workspace_context() -> str:
 - Docker sandbox images/runtime packages may differ between role conversations.
 - Do not assume OS packages installed by another role are available in your container.
 - Read-only roles must not modify shared workspace files.
-- Writer/QA/reviewer/publisher roles must keep changes focused and report setup/install attempts.""".strip()
+- Writer/QA/reviewer roles must keep changes focused and report setup/install attempts.
+- Publisher is a delivery role, not a fixer: it may mutate only delivery metadata/actions explicitly allowed by its contract (branch/commit/push/PR/external publication) and must not edit implementation, tests, docs, generated sources, dependency files, or runtime configuration.""".strip()
 
 
 def latest_validation_profile(state: JsonDict) -> JsonDict:
@@ -286,11 +290,13 @@ Original user task:
 
 Global workflow rules:
 - Execute only the responsibility of your current role.
+- Role boundaries are safety-critical. If you discover work that belongs to another role, stop your current role work and report NEED_FIX/BLOCKER with evidence instead of doing that work yourself.
 - LangGraph and Team Lead control role order. Do not launch, simulate, or claim later roles.
 - Do not take over the whole workflow.
 - Do not create pull requests unless your role explicitly says Publisher.
 - Publishing boundary is absolute: every non-Publisher role MUST NOT create branches for publication, commit, push, create or update pull requests, call GitHub write APIs, run `gh pr create`, run `git push`, or use `GITHUB_TOKEN`.
 - Be concrete and evidence-based: file paths, files inspected, commands inspected/run, observed results.
+- Do not continue from investigation into implementation unless your role explicitly owns implementation.
 - If you cannot determine something, say exactly what is unknown and why.
 - Avoid unrelated changes.
 
@@ -413,6 +419,7 @@ Core policy:
 - Do not force a fixed role chain. Recommend only roles that add necessary evidence or risk reduction for this task.
 - If external/current API/spec/CI/config behavior affects correctness and Research did not provide authoritative current-docs evidence, return NEED_MORE_RESEARCH rather than allowing implementation from model memory.
 - If current-docs evidence is present, turn it into target-runtime constraints and validation requirements.
+- Treat Publisher as a delivery/check-evidence collector only. Do not assign Publisher to debug, root-cause, validate, or fix CI/test failures. Failed PR checks must become structured feedback for Team Lead, usually to route Scout/QA/Coder/Reviewer.
 
 Output contract:
 # Senior Staff Engineering Strategy
@@ -461,6 +468,7 @@ Role-flexibility guidance:
 - If full QA is likely unnecessary, explain the narrower evidence that would be sufficient and the residual risk.
 - If the plan depends on external/current API/spec/config behavior and Research did not verify it with local-docs/searxNcrawl, request Research instead of planning from model memory.
 - Assess documentation impact for every repository change. If public behavior, CLI, config, API/schema, CI/deployment workflow, user-visible output, examples, or installation changes, documentation is required. Name the exact docs targets. If docs are not required, state a concrete waiver reason.
+- In Publisher constraints, say only what Publisher must publish/check. Do not ask Publisher to debug failing tests, inspect source to determine fixes, run validation, or modify files.
 
 Output contract:
 # Architect Plan
@@ -520,6 +528,7 @@ Do:
 - Update documentation when the change affects public behavior, CLI/config/API/schema, CI/deployment workflow, installation, examples, user-visible output, or role/policy behavior. If docs are not required, record a concrete waiver reason.
 - Run the cheapest credible validation for your change: compile/build/test/lint/docs check as relevant.
 - Report exactly what changed and what validation passed/failed/skipped.
+- If validation fails or an implementation bug remains, report NOT_READY_VALIDATION_FAILED/NEED_FIX evidence for Team Lead. Do not leave unresolved known failures for Publisher to diagnose or fix.
 
 Do not:
 - Use crawl_site unless explicitly requested by Team Lead.
@@ -574,6 +583,7 @@ Validation policy:
 - Do not use live docs lookup by default; use it only if validation depends on current external syntax/CLI behavior not already covered by Research/Coder URLs.
 - Do not skip runtime/smoke/integration/CI targets that are relevant to the task unless setup attempts produce a concrete blocker.
 - Check documentation consistency against the actual diff. If code/config/user-visible behavior changed, verify that relevant docs/examples/.env.sample/README entries were updated or that the docs waiver is concrete and valid.
+- When validation fails, produce minimal failure evidence and required fixes for Coder/Team Lead. Do not suggest Publisher as the role to investigate or fix validation failures.
 
 Output contract:
 # QA Report
@@ -633,6 +643,7 @@ Flexible QA policy:
 - Only call local-docs/searxNcrawl if the implementation uses syntax or behavior not supported by cited sources, or if you see suspicious external API/spec/config usage.
 - Do not PASS if required runtime/smoke/integration/CI targets were skipped without concrete setup attempts.
 - Do not PASS if documentation impact was not assessed. If docs are required, verify the actual docs diff. If docs are waived, verify the waiver is concrete and the change is truly internal/non-user-facing.
+- Publisher readiness means only delivery readiness: existing implementation is ready to be committed/pushed/PR'd and PR checks can be observed. Do not rely on Publisher to perform review, validation, debugging, or fixes.
 
 Output contract:
 # Reviewer Report
@@ -679,8 +690,16 @@ Reviewer routing/status summary:
 {validation_profile_context(state)}
 
 Your responsibility depends on the accepted Team Lead work_order:
-- repository/repo_change: inspect final repository changes, verify they match the task and accepted Team Lead policy, push a branch, create/find a GitHub PR using curl + GITHUB_TOKEN, then inspect PR checks with gh.
+- repository/repo_change: perform delivery only. Inspect final diff metadata, verify the workflow evidence gates are present, commit already-prepared workspace changes when needed, push a branch, create/find a GitHub PR using curl + GITHUB_TOKEN, then inspect PR checks with gh.
 - external_publication/direct_external_api: perform only the bounded external publication requested by Team Lead, such as a GitHub Discussion/issue/release comment. Do not create helper scripts, commits, branches, pushes, or PRs unless Team Lead explicitly classifies the work_order as repository/repo_change.
+
+Publisher hard boundary:
+- You are not Coder, QA, Reviewer, Architect, or Scout. Do not take over their work even when the fix looks obvious.
+- Do not edit, generate, format, or delete implementation files, test files, documentation files, config files, dependency files, generated sources, workflows, or scripts.
+- Do not run repository tests/builds/linters/formatters/generators to diagnose or repair failures. PR check observation is allowed; local validation/debugging is not.
+- Do not open source files to find the root cause of a PR-check/test failure. You may inspect git status, git log, git diff --stat/name-only, PR metadata, CI/check names, CI/check conclusions, and short failure log excerpts needed to route the failure.
+- If code/docs/tests/config changes are required, or if a PR check fails with a stack trace, compiler error, test failure, nil pointer, panic, timeout, or missing dependency, stop delivery and return ACTION: NEED_FIX or BLOCKER with structured failure evidence and publisher_recommendation for the next role.
+- Never say "let me inspect the source files to understand/fix the issue". The safe action is to collect bounded check evidence and hand control back to Team Lead.
 
 Publishing rules:
 - You are the only role allowed to push, create a PR, or perform bounded external write/publication actions.
@@ -689,10 +708,11 @@ Publishing rules:
 - Use gh for post-creation PR view/check/status operations.
 - If checks exist, wait for them with gh pr checks --watch or an equivalent bounded gh polling loop and report final status.
 - If no checks exist, do not invent CI success. Inspect whether the repo/branch actually has no check configuration/statuses, report structured pr_checks.overall_status="no_checks_configured" or "no_checks_found", waited=true, and include evidence.
+- If checks fail, do not debug or fix. Report pr_checks.overall_status="failed", failing_checks, bounded log excerpts, failure_analysis with change_related=unknown unless prior roles already proved otherwise, and publisher_recommendation.ready_to_complete=false.
 - For external_publication, return structured `publication` evidence with published=true and artifact_url/url or artifact_id/comment_id/node_id.
 - For repository publishing, verify that Team Lead accepted documentation impact evidence before pushing/creating PR. Return NEED_FIX/BLOCKER if documentation evidence is missing or invalid.
-- For repository publishing, return structured `publish` and `pr_checks` evidence.
-- Do not modify implementation code or documentation. Return NEED_FIX/BLOCKER if code or docs changes are required.
+- For repository publishing, return structured `publish`, `pr_checks`, and `repository_mutation_guard` evidence.
+- Before and after delivery actions, inspect `git status --short`. If your actions create any source/doc/test/config changes beyond intended git commit metadata/publication actions, return BLOCKER and report the unexpected mutation.
 - Do not perform live docs lookup unless publishing behavior itself depends on current external API behavior not covered by prior roles.
 
 Output contract:
@@ -705,6 +725,10 @@ ACTION: PASS, NEED_FIX, or BLOCKER
 ## External Publication
 ## PR Checks / Statuses
 ## Evidence Inspected
+## PR Failure Evidence For Next Role
+For failed checks, include only bounded routing evidence: check name, conclusion, command/step if visible, short error excerpt, log URL when available, and recommended next role. Do not include a proposed source-code fix unless a prior Coder/QA/Reviewer report already stated it.
+## Repository Mutation Guard
+Include repository_mutation_guard with before_status, after_status, source_files_edited_by_publisher=false, forbidden_mutation_detected=false|true, and notes.
 ## Team Lead Policy / QA / Reviewer Constraint Check
 ## Commands Used
 Do not include secrets.
@@ -767,6 +791,9 @@ def _team_lead_history_sections(state: JsonDict) -> str:
                 "validation",
                 "validation_review",
                 "pr_checks",
+                "pr_feedback",
+                "repository_mutation_guard",
+                "publisher_recommendation",
                 "publication",
             ):
                 if role_report.get(key) not in (None, [], {}):
@@ -818,6 +845,7 @@ Current-role assignment boundary:
 - `instructions` must contain only work that the selected `next_role` is allowed to perform now.
 - Do not put future workflow steps into `instructions`; put them only into `future_workflow_plan`.
 - For every non-Publisher role, `instructions` must not ask for commit, branch creation for publication, push, PR / pull request creation or update, `gh pr`, GitHub write API calls, `GITHUB_TOKEN`, or any write-capable credential.
+- For Publisher, `instructions` must describe delivery/check-evidence work only. They must not ask Publisher to debug, inspect source for root cause, run local validation, fix code/tests/docs/config, or continue after failed checks except to collect bounded failure evidence.
 - If the selected role must use current docs, say so explicitly in `instructions` and request bounded local-docs/searxNcrawl use: search first, max 3 results, crawl one official/current page, no crawl_site unless broad research is needed.
 
 Allowed actions:
@@ -837,6 +865,7 @@ Work-order routing policy:
 - For external_publication/direct_external_api tasks such as GitHub Discussion comments, issue comments, release announcements, or status updates: do not route to Coder merely to create a helper script; route to Publisher directly after Scout/Research evidence is sufficient. Publisher must return structured publication evidence, not PR checks.
 - For live_server/kubernetes_cluster/monitoring/database/network/security work: use the existing roles as capabilities for now. Require target verification, readonly discovery, explicit plan, rollback path for risky mutation, execution evidence, and independent validation evidence when available. If the safe role does not exist yet, ASK_HUMAN instead of forcing Coder.
 - Publisher PASS for repository changes is acceptable only with structured PR/check evidence. If checks exist, they must be successful. If no checks are configured/found, Publisher must report structured no-checks evidence; you may accept it by setting publisher_no_checks_accepted=true and publisher_pr_checks_accepted=true.
+- Failed Publisher PR checks are feedback, not permission for Publisher to fix. If Publisher returns failed checks, normally route Scout/QA/Coder/Reviewer with the bounded failure evidence; do not retry Publisher to debug or edit files.
 - Publisher PASS for external_publication is acceptable only with structured publication evidence: publication.published=true and artifact_url/url or artifact_id/comment_id/node_id. Accept it by setting publisher_publication_evidence_accepted=true.
 - STOP_COMPLETED requires the evidence contract for the current work_order, not a fixed role chain.
 - If the last specialist role failed before producing a usable result, retry that same role_instance when retryable, or ASK_HUMAN/STOP_BLOCKED when unsafe.
@@ -893,6 +922,7 @@ Required JSON keys:
 For RUN_ROLE/RETRY_ROLE, invalid examples:
 - next_role=coder with instructions containing commit/push/create PR. Put those items in future_workflow_plan and run publisher later instead.
 - next_role=qa/reviewer with implementation or publishing tasks in instructions.
+- next_role=publisher with debugging, root-cause analysis, source inspection for failed tests, local validation, implementation, or documentation-fix tasks in instructions.
 - next_role=scout with implementation, root-cause hypotheses, tests, builds, or patch requests.
 - work_order.change_surface=external_publication with next_role=coder/qa/reviewer when no repository files need to change.""".strip()
 
@@ -907,7 +937,7 @@ def role_report_footer(role: str) -> str:
         "coder": '{"schema_version":"1.0","role":"coder","action":"PASS","summary":"implementation completed","risk_level":"medium","blocking":false,"blocking_summary":[],"change_set_id":"coder-1-attempt-1","files_changed":[],"documentation":{"impact_assessed":true,"required":false,"updated":false,"files":[],"reason":"internal-only change","waiver_reason":"no user-facing behavior, config, CLI, API, deployment, workflow, examples, or installation docs changed"},"docs_lookup_used":false,"docs_sources":[],"self_validation":{"build_commands":[],"test_commands":[],"passed":false,"gaps":[]},"ready_for_qa":true}',
         "qa": '{"schema_version":"1.0","role":"qa","action":"PASS","summary":"validation completed","risk_level":"low","blocking":false,"blocking_summary":[],"validated_change_set_id":"coder-1-attempt-1","docs_lookup_used":false,"docs_sources":[],"documentation":{"impact_assessed":true,"required":false,"updated":false,"files":[],"reason":"QA verified docs waiver against diff","waiver_reason":"change is internal-only and no docs target is affected"},"validation":{"overall_status":"passed","validation_level":"targeted_unit","targets":[],"gaps":[],"build_ran":true,"build_passed":true,"tests_run":true,"tests_passed":true,"build_commands":[],"test_commands":[],"setup_commands":[],"install_commands":[]},"required_targets_passed":true,"blocking_gaps":[],"accepted_gaps":[],"ready_for_review":true}',
         "reviewer": '{"schema_version":"1.0","role":"reviewer","action":"PASS","summary":"review passed","risk_level":"medium","blocking":false,"blocking_summary":[],"reviewed_change_set_id":"coder-1-attempt-1","docs_verification_used":false,"docs_sources":[],"documentation":{"impact_assessed":true,"required":false,"updated":false,"files":[],"reason":"Reviewer verified docs impact against actual diff","waiver_reason":"no user-facing behavior, config, CLI, API, deployment, workflow, examples, or installation docs changed"},"review":{"diff_reviewed":true,"qa_evidence_reviewed":true,"qa_waiver_reviewed":false,"qa_evidence_accepted":true,"findings":[],"required_fixes":[],"publisher_ready":true},"validation_review":{"qa_build_evidence_ok":true,"qa_test_evidence_ok":true,"qa_validation_level_ok":true,"qa_skip_accepted":false,"lint_commands":[],"validation_gaps":[]}}',
-        "publisher": '{"schema_version":"1.0","role":"publisher","action":"PASS","summary":"PR created and checks handled","risk_level":"low","blocking":false,"blocking_summary":[],"publish":{"branch":"feature/example","commit":"","head_sha":"","base":"main","pr_number":0,"pr_url":"","pushed":true,"pr_created":true},"pr_checks":{"overall_status":"passed","head_sha":"","waited":true,"check_runs":[],"commit_status":{"state":"success","statuses":[]},"failing_checks":[],"pending_checks":[],"checked_at":""},"publisher_recommendation":{"ready_to_complete":true,"reason":""}}',
+        "publisher": '{"schema_version":"1.0","role":"publisher","action":"PASS","summary":"PR created and checks handled","risk_level":"low","blocking":false,"blocking_summary":[],"publish":{"branch":"feature/example","commit":"","head_sha":"","base":"main","pr_number":0,"pr_url":"","pushed":true,"pr_created":true},"pr_checks":{"overall_status":"passed","head_sha":"","waited":true,"check_runs":[],"commit_status":{"state":"success","statuses":[]},"failing_checks":[],"pending_checks":[],"checked_at":""},"repository_mutation_guard":{"before_status":"","after_status":"","source_files_edited_by_publisher":false,"forbidden_mutation_detected":false,"notes":"delivery-only mutations"},"publisher_recommendation":{"ready_to_complete":true,"reason":""}}',
     }
     example = examples.get(
         role,
@@ -988,7 +1018,7 @@ def build_role_summary_instructions(role: str) -> str:
     if role == "publisher":
         return _summary_schema_contract(
             role,
-            "Publisher action must be PASS only when the assigned delivery work is complete with structured evidence. For repository publishing: a PR was created/found, pushed branch/head SHA identified, and PR checks/statuses were handled with gh. If checks exist, they must pass. If no checks are configured/found, include pr_checks.overall_status='no_checks_configured' or 'no_checks_found', waited=true, head_sha, and evidence fields; Team Lead decides whether to accept. For external publication: include publication.published=true and artifact_url/url or artifact_id/comment_id/node_id. Include extra keys pr_checks and/or publication and copy them from the publisher answer.",
+            "Publisher action must be PASS only when the assigned delivery work is complete with structured evidence and no forbidden source/doc/test/config mutation was made by Publisher. For repository publishing: a PR was created/found, pushed branch/head SHA identified, and PR checks/statuses were handled with gh. If checks exist, they must pass. If no checks are configured/found, include pr_checks.overall_status='no_checks_configured' or 'no_checks_found', waited=true, head_sha, and evidence fields; Team Lead decides whether to accept. If checks fail, action must be NEED_FIX or BLOCKER, not PASS, and the summary must include bounded pr_feedback/failure evidence plus publisher_recommendation for the next role; do not include claims that Publisher debugged or fixed code. For external publication: include publication.published=true and artifact_url/url or artifact_id/comment_id/node_id. Include extra keys pr_checks, pr_feedback, repository_mutation_guard, and/or publication and copy them from the publisher answer.",
         )
     if role == "coder":
         return _summary_schema_contract(
@@ -1061,7 +1091,7 @@ def role_input_summary(role: str, state: JsonDict) -> list[str]:
     elif role == "publisher":
         lines.append(f"qa summary: {_short(_summary_text(state.get('qa_result')), 220)}")
         lines.append(f"reviewer summary: {_short(_summary_text(state.get('reviewer_result')), 220)}")
-        lines.append("mode: push branch, create/find PR, inspect/wait checks or structured no-checks evidence")
+        lines.append("mode: delivery only; push/create PR and inspect/wait checks; failed checks become NEED_FIX evidence, not Publisher debugging/fixing")
     else:
         lines.append("custom role prompt is passed as-is")
     return lines

@@ -108,6 +108,7 @@ class PublisherReport(RoleReportBase):
     pr_checks: JsonDict = Field(default_factory=dict)
     publication: JsonDict = Field(default_factory=dict)
     pr_feedback: JsonDict = Field(default_factory=dict)
+    repository_mutation_guard: JsonDict = Field(default_factory=dict)
     publisher_recommendation: JsonDict = Field(default_factory=dict)
 
 
@@ -297,6 +298,8 @@ def compact_report_summary(report: JsonDict) -> JsonDict:
             base["publication"] = report.get("publication")
         if report.get("pr_feedback"):
             base["pr_feedback"] = report.get("pr_feedback")
+        if report.get("repository_mutation_guard"):
+            base["repository_mutation_guard"] = report.get("repository_mutation_guard")
         if report.get("publisher_recommendation"):
             base["publisher_recommendation"] = report.get("publisher_recommendation")
     return {k: v for k, v in base.items() if v is not None}

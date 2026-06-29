@@ -176,7 +176,7 @@ ROLE_CATALOG: Mapping[str, RoleSpec] = {
         name="publisher",
         title="Publisher / Delivery Publisher",
         category="delivery",
-        description="the only role allowed to commit/push/create PRs or perform bounded external publication actions when assigned.",
+        description="delivery-only role; the only role allowed to commit/push/create PRs or perform bounded external publication actions when assigned; must not debug/fix failed checks or edit implementation/docs/tests/config.",
         capabilities=frozenset(
             {
                 "read_repo",
@@ -189,7 +189,7 @@ ROLE_CATALOG: Mapping[str, RoleSpec] = {
                 "inspect_release_artifacts",
                 "monitor_workflow",
                 "inspect_pr_checks",
-                "classify_pr_check_failures",
+                "collect_pr_check_failure_evidence",
                 "publish_comment",
                 "publish_discussion_comment",
                 "publish_issue_comment",
