@@ -442,6 +442,41 @@ class OpenHandsClient:
             return data
         return None
 
+    async def search_sandboxes(
+        self,
+        limit: int = 100,
+        page_id: str | None = None,
+    ) -> JsonDict:
+        """Search/list sandboxes owned by the current user.
+
+        GET /api/v1/sandboxes/search
+        """
+        params: dict[str, str | int] = {"limit": limit}
+        if page_id:
+            params["page_id"] = page_id
+        return await self._request("GET", "/api/v1/sandboxes/search", params=params)
+
+    async def search_app_conversations(
+        self,
+        sandbox_id__eq: str | None = None,
+        limit: int = 100,
+        page_id: str | None = None,
+        include_sub_conversations: bool = False,
+    ) -> JsonDict:
+        """Search app conversations, optionally filtered by sandbox_id.
+
+        GET /api/v1/app-conversations/search
+        """
+        params: dict[str, str | int | bool] = {
+            "limit": limit,
+            "include_sub_conversations": include_sub_conversations,
+        }
+        if sandbox_id__eq:
+            params["sandbox_id__eq"] = sandbox_id__eq
+        if page_id:
+            params["page_id"] = page_id
+        return await self._request("GET", "/api/v1/app-conversations/search", params=params)
+
     async def update_app_conversation(self, conversation_id: str, patch: JsonDict) -> JsonDict | None:
         """Patch V1 app-conversation metadata when the server supports it.
 
